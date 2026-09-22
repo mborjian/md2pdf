@@ -1,0 +1,73 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Test / coverage / typechecker / linter caches
+.pytest_cache/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.pyright/
+.pytype/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+.freebuff/project-id
+
+# Logs
+*.log
+logs/
+
+# md2pdf runtime output
+output/
+.build/
+*.tmp
+*.bak
+
+# Secrets / local overrides
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
