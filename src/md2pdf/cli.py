@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-from . import __version__, docids, projects
+from . import __version__, docids, native_env, projects
 from .templates import PAGE_SIZE_NAMES, PRESET_NAMES, Template, default_template, preset
 
 COMMANDS = ("convert", "project", "templates", "ui")
@@ -53,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument("-t", "--template", help="preset name, project template name or JSON path")
     convert.add_argument("-p", "--project", help="project directory for templates, ids and history")
     convert.add_argument("--title", help="document title used by headers, covers and the file name")
+    convert.add_argument("--subtitle", help="subtitle available to covers and tokens")
+    convert.add_argument("--author", help="author written to PDF metadata and available as {author}")
+    convert.add_argument("--company", help="company available to covers and tokens")
     convert.add_argument("--doc-id", dest="doc_id", help="override the document id pattern")
     convert.add_argument("--no-doc-id", dest="no_doc_id", action="store_true", help="disable document ids")
     convert.add_argument("--page-size", help="page size such as A4, Letter or 210x297")
@@ -117,6 +121,12 @@ def apply_overrides(template: Template, args: argparse.Namespace) -> Template:
             template.page.size = match
     if args.landscape:
         template.page.orientation = "landscape"
+    if getattr(args, "subtitle", None):
+        template.document.subtitle = args.subtitle
+    if getattr(args, "author", None):
+        template.document.author = args.author
+    if getattr(args, "company", None):
+        template.document.company = args.company
     if args.doc_id:
         template.document.docid.enabled = True
         template.document.docid.pattern = args.doc_id
@@ -142,11 +152,19 @@ def _resolve_output(output: str | None, input_path: Path, default_name: str) -> 
     return target
 
 
+def _is_directory_target(output: str | None) -> bool:
+    if not output:
+        return True
+    if output.endswith(("/", "\\")):
+        return True
+    return Path(output).expanduser().is_dir()
+
+
 def _output_directory(output: str | None, input_path: Path) -> Path:
     if not output:
         return input_path.parent
     target = Path(output).expanduser()
-    if output.endswith(("/", "\\")) or target.is_dir():
+    if _is_directory_target(output):
         return target
     return target.parent
 
@@ -172,7 +190,10 @@ def command_convert(args: argparse.Namespace) -> int:
         return 1
     text = input_path.read_text(encoding="utf-8")
     context = docids.DocIdContext(
-        title=args.title or template.document.title or input_path.stem,
+        title=args.title
+        or template.document.title
+        or converter.first_heading(text)
+        or input_path.stem,
         project=project.meta.name if project else "",
         filename=input_path.name,
     )
@@ -198,9 +219,6 @@ def command_convert(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(f"md2pdf: {exc}", file=sys.stderr)
         return 1
-    target = _resolve_output(args.output, input_path, result.output_name)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(result.pdf_bytes)
     for warning in result.warnings:
         print(f"md2pdf: warning: {warning}", file=sys.stderr)
     if args.save_html:
@@ -208,10 +226,10 @@ def command_convert(args: argparse.Namespace) -> int:
     if args.save_css:
         Path(args.save_css).expanduser().write_text(result.css, encoding="utf-8")
     if project is not None:
-        project.save_conversion(
+        entry = project.save_conversion(
             text,
             pdf_bytes=result.pdf_bytes,
-            output_name=target.name,
+            output_name=result.output_name,
             doc_id=doc_id,
             title=context.title,
             template_name=template.name,
@@ -219,6 +237,18 @@ def command_convert(args: argparse.Namespace) -> int:
             page_count=result.page_count,
             save_markdown=template.document.output.save_markdown,
         )
+        target = project.absolute(entry["pdf"])
+        if args.output:
+            copy = _resolve_output(args.output, input_path, target.name)
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(result.pdf_bytes)
+            target = copy
+    else:
+        target = _resolve_output(args.output, input_path, result.output_name)
+        if _is_directory_target(args.output):
+            target = docids.unique_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(result.pdf_bytes)
     if args.quiet:
         print(target)
     else:
@@ -307,6 +337,7 @@ def command_ui(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"md2pdf: Streamlit is not installed: {exc}", file=sys.stderr)
         return 1
+    os.environ.update(native_env.environment_with_library_path())
     sys.argv = [
         "streamlit",
         "run",
@@ -321,6 +352,8 @@ def command_ui(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if native_env.cli_relaunch_needed():
+        native_env.relaunch_with_library_path(arguments)
     if arguments and arguments[0] not in COMMANDS and not arguments[0].startswith("-"):
         arguments.insert(0, "convert")
     parser = build_parser()

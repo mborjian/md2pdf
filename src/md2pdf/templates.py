@@ -218,7 +218,7 @@ class DocIdOptions:
 
 @dataclass
 class OutputOptions:
-    filename_pattern: str = "[{doc_id}-]{date:%Y%m%d}-{slug}"
+    filename_pattern: str = "[{doc_id}-]{slug}"
     save_markdown: bool = True
 
 

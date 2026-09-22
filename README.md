@@ -34,22 +34,29 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+Python 3.10 or newer is required: the inline PDF viewer is built on a recent Streamlit, and
+Streamlit 1.50 is the last release that supports 3.9. The suite is developed and verified on 3.12.
+
 ## Streamlit app
 
 ```bash
-md2pdf ui                       # or: streamlit run app.py
+md2pdf ui                                  # or: streamlit run app.py
+streamlit run src/md2pdf/streamlit_app.py   # the packaged entry point, no console script needed
 ```
 
-The app opens on `http://localhost:8501`.
+The app opens on `http://localhost:8501`. On macOS `md2pdf ui` is the recommended entry point: it
+puts Homebrew's `lib` on the dynamic loader path before starting Python, so WeasyPrint finds Pango.
 
 ### One-time convert
 
 1. Pick a source: paste Markdown, drop one or more `.md` files, load the example, or convert a
    document that already lives in an open project.
-2. Optionally tick **Save copy** and choose a folder. Without it, nothing is written to disk and the
-   result is only offered as a download.
-3. Press **Convert to PDF**, then download the PDF from the Results panel, or inspect the rendered
-   HTML preview underneath.
+2. Optionally tick **Save copy** and choose a folder — type it or press **Browse…** for the system
+   folder dialog. Without it, nothing is written to disk and the result is only offered as a download.
+3. Press **Convert to PDF**. The Preview panel then shows the rendered PDF next to the live HTML
+   view, so a template change can be judged in one click: convert again and the two panes update
+   together. The layout selector switches between **PDF and preview**, **PDF only** and **Preview
+   only**, and the PDF is also offered as a download.
 
 ### Project workspace
 
@@ -65,11 +72,24 @@ Reports/
   assets/           logos, images, any file a template refers to
   manifest.json     history: doc id, title, template, pages, file names, timestamps
   state.json        document id counters
+  session.json      where you left off: template, Markdown, source mode, layout
 ```
 
 Everything stays inside that folder, so a project can be moved, copied, archived, or committed to
 git. The Library tab lists the history and can send an old Markdown file back into the editor with
 its document id intact.
+
+**Opening a project.** Type a path, pick one from the list of projects the app has seen, or press
+**Browse…** for the system folder dialog, the same panel your file manager shows. Picking a folder
+*inside* a project (its `output/`, say) opens the project it belongs to, and the next dialog starts
+beside the last project you used. The dialog is Tk, launched in its own process so it can be raised
+from a browser session; a Python without tkinter gets a clear message instead of a failure.
+
+**Continue where you left off.** Every run stores the template you were editing — colors, fonts,
+logos, all of it — together with the Markdown, the source mode and the preview layout in the
+project's `session.json`. Reopening the project puts them all back, and the sequence counter in
+`state.json` carries on from the last id. Editing a template file by hand (or with the CLI) wins over
+the stored session, so the files on disk stay the source of truth.
 
 ### Templates
 
@@ -170,11 +190,14 @@ pytest
 
 The suite runs without WeasyPrint or Streamlit: the pipeline tests skip themselves when a dependency
 is missing, while the template model, stylesheet builder, document id engine, project store and CLI
-tests run everywhere.
+tests run everywhere. `tests/test_ui.py` drives the real Streamlit app headlessly through Streamlit's
+`AppTest` harness, so widget keys, session state and the conversion flow are covered without a
+browser.
 
 ```
 src/md2pdf/cli.py        command line entry point
 src/md2pdf/converter.py  Markdown -> HTML -> PDF
+src/md2pdf/native_env.py Homebrew library path helper for WeasyPrint on macOS
 src/md2pdf/docids.py     document id patterns and counters
 src/md2pdf/projects.py   project folders, assets, history
 src/md2pdf/styles.py     CSS generation

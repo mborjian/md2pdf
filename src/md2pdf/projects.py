@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
+import os
 import shutil
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -13,6 +15,10 @@ from .templates import SCHEMA_VERSION, Template, default_template
 PROJECT_FILE = "project.json"
 MANIFEST_FILE = "manifest.json"
 STATE_FILE = "state.json"
+SESSION_FILE = "session.json"
+RECENTS_FILE = "recents.json"
+RECENTS_LIMIT = 8
+NESTED_PROJECT_LEVELS = 8
 TEMPLATES_DIR = "templates"
 DOCUMENTS_DIR = "documents"
 OUTPUT_DIR = "output"
@@ -116,6 +122,16 @@ class Project:
     def save_manifest(self) -> Path:
         return _write_json(self.root / MANIFEST_FILE, self.manifest)
 
+    def session_path(self) -> Path:
+        return self.root / SESSION_FILE
+
+    def load_session(self) -> dict:
+        data = _read_json(self.session_path(), {})
+        return data if isinstance(data, dict) else {}
+
+    def save_session(self, data: dict) -> Path:
+        return _write_json(self.session_path(), data if isinstance(data, dict) else {})
+
     def save(self) -> None:
         self.save_meta()
         self.save_state()
@@ -139,6 +155,12 @@ class Project:
         if not template.name:
             template.name = name
         return template
+
+    def template_digest(self, name: str) -> str:
+        path = self.template_path(name)
+        if not path.is_file():
+            return ""
+        return hashlib.sha1(path.read_bytes()).hexdigest()
 
     def load_first_template(self) -> Template:
         names = self.template_names()
@@ -402,15 +424,7 @@ def _write_json(path: Path, data) -> Path:
 
 
 def _unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    for index in range(2, 1000):
-        candidate = path.with_name(f"{stem}-{index}{suffix}")
-        if not candidate.exists():
-            return candidate
-    return path.with_name(f"{stem}-{uuid.uuid4().hex[:6]}{suffix}")
+    return docids.unique_path(path)
 
 
 def find_projects(root: str | Path, max_depth: int = 3) -> list[Path]:
@@ -432,3 +446,73 @@ def default_projects_root() -> Path:
     home = Path.home()
     documents = home / "Documents"
     return (documents if documents.is_dir() else home) / "md2pdf-projects"
+
+
+def is_project(root: str | Path) -> bool:
+    return (Path(root).expanduser() / PROJECT_FILE).is_file()
+
+
+def list_subdirectories(root: str | Path) -> list[Path]:
+    base = Path(root).expanduser()
+    if not base.is_dir():
+        return []
+    try:
+        entries = list(base.iterdir())
+    except OSError:
+        return []
+    return sorted(
+        (item for item in entries if item.is_dir() and not item.name.startswith(".")),
+        key=lambda item: item.name.lower(),
+    )
+
+
+def nearest_project_root(root: str | Path, max_levels: int = NESTED_PROJECT_LEVELS) -> Path | None:
+    current = Path(root).expanduser()
+    try:
+        current = current.resolve()
+    except OSError:
+        return None
+    if current.is_file():
+        current = current.parent
+    for _ in range(max_levels + 1):
+        if is_project(current):
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def app_home() -> Path:
+    override = os.environ.get("MD2PDF_HOME", "").strip()
+    return Path(override).expanduser() if override else Path.home() / ".md2pdf"
+
+
+def recents_file() -> Path:
+    return app_home() / RECENTS_FILE
+
+
+def load_recents() -> list[Path]:
+    data = _read_json(recents_file(), [])
+    if not isinstance(data, list):
+        return []
+    values: list[Path] = []
+    for item in data:
+        candidate = Path(str(item)).expanduser()
+        if candidate not in values:
+            values.append(candidate)
+    return values
+
+
+def remember_recent(root: str | Path) -> list[Path]:
+    path = Path(root).expanduser()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    entries = [item for item in load_recents() if item != path]
+    entries.insert(0, path)
+    entries = entries[:RECENTS_LIMIT]
+    _write_json(recents_file(), [str(item) for item in entries])
+    return entries

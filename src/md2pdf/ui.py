@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import datetime
 import re
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
 
-from . import converter, docids, projects, styles
+from . import converter, docids, native_env, picker, projects, styles
 from .templates import (
     DOC_ID_PLACEMENTS,
     FONT_STACKS,
@@ -26,6 +27,9 @@ SOURCE_PASTE = "Paste Markdown"
 SOURCE_UPLOAD = "Upload files"
 SOURCE_EXAMPLE = "Example document"
 SOURCE_PROJECT = "Project document"
+SOURCE_MODES = (SOURCE_PASTE, SOURCE_UPLOAD, SOURCE_EXAMPLE, SOURCE_PROJECT)
+PREVIEW_LAYOUTS = ["PDF and preview", "PDF only", "Preview only"]
+SESSION_SCHEMA = 1
 HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 MM_TO_PX = 96 / 25.4
 PREVIEW_AVAILABLE_PX = 760.0
@@ -69,27 +73,112 @@ def current_project() -> projects.Project | None:
     return value if isinstance(value, projects.Project) else None
 
 
+def session_snapshot(template: Template, project: projects.Project) -> dict:
+    names = project.template_names()
+    source = template.name if template.name in names else ""
+    return {
+        "schema": SESSION_SCHEMA,
+        "template": template.to_dict(),
+        "template_source": source,
+        "template_digest": project.template_digest(source) if source else "",
+        "source_mode": str(st.session_state.get("source_mode", SOURCE_PASTE)),
+        "source_name": str(st.session_state.get("source_name", "")),
+        "source_text": str(st.session_state.get("source_text", ""))[:200000],
+        "preview_layout": str(st.session_state.get("layout_pref", PREVIEW_LAYOUTS[0])),
+        "updated": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def without_stamp(snapshot: dict) -> dict:
+    return {key: value for key, value in snapshot.items() if key != "updated"}
+
+
+def remember_project_session(project: projects.Project, template: Template) -> None:
+    snapshot = session_snapshot(template, project)
+    cache = st.session_state.get("session_written") or {}
+    if cache.get("root") == str(project.root) and cache.get("snapshot") == without_stamp(snapshot):
+        return
+    project.save_session(snapshot)
+    st.session_state["session_written"] = {
+        "root": str(project.root),
+        "snapshot": without_stamp(snapshot),
+    }
+
+
+def apply_project_session(project: projects.Project) -> None:
+    data = project.load_session()
+    stored = data.get("template")
+    source = str(data.get("template_source") or "")
+    digest = str(data.get("template_digest") or "")
+    stale = bool(source and digest) and project.template_digest(source) != digest
+    template: Template | None = None
+    if isinstance(stored, dict) and not stale:
+        try:
+            template = Template.from_dict(stored)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            template = None
+    if template is None:
+        names = project.template_names()
+        active = source if source in names else (names[0] if names else "")
+        try:
+            template = project.load_template(active) if active else project.load_first_template()
+        except (FileNotFoundError, ValueError):
+            template = project.load_first_template()
+    set_template(template)
+    mode = str(data.get("source_mode") or "")
+    if mode in SOURCE_MODES:
+        st.session_state["pending_source_mode"] = mode
+    text = str(data.get("source_text") or "")
+    name = str(data.get("source_name") or "")
+    if text or name:
+        set_source(text, name or "pasted.md", mode if mode in SOURCE_MODES else SOURCE_PASTE)
+    layout = str(data.get("preview_layout") or "")
+    if layout in PREVIEW_LAYOUTS:
+        st.session_state["layout_pref"] = layout
+        st.session_state["pending_preview_layout"] = layout
+    st.session_state["results"] = []
+    st.session_state["session_written"] = {
+        "root": str(project.root),
+        "snapshot": without_stamp(data),
+    }
+
+
 def open_project(path: str | Path) -> bool:
+    candidate = Path(path).expanduser()
+    project: projects.Project | None = None
     try:
-        project = projects.Project.open(path)
-    except (FileNotFoundError, OSError) as exc:
-        st.session_state["status"] = f"Cannot open project: {exc}"
-        return False
+        project = projects.Project.open(candidate)
+    except (FileNotFoundError, OSError):
+        project = None
+    note = ""
+    if project is None:
+        root = projects.nearest_project_root(candidate)
+        if root is None:
+            st.session_state["status"] = (
+                f"Cannot open '{candidate}': no {projects.PROJECT_FILE} in it or in a parent folder."
+            )
+            return False
+        try:
+            project = projects.Project.open(root)
+        except (FileNotFoundError, OSError) as exc:
+            st.session_state["status"] = f"Cannot open project: {exc}"
+            return False
+        note = f" (nearest project above {candidate})"
     st.session_state["project"] = project
     st.session_state["pending_mode"] = MODE_PROJECT
-    names = project.template_names()
-    if names:
-        try:
-            set_template(project.load_template(names[0]))
-        except (FileNotFoundError, ValueError):
-            pass
-    st.session_state["status"] = f"Opened project '{project.meta.name}'."
+    st.session_state["last_browse_dir"] = str(project.root.parent)
+    apply_project_session(project)
+    projects.remember_recent(project.root)
+    st.session_state["status"] = f"Opened project '{project.meta.name}' in {project.root}{note}."
     return True
 
 
-def document_context(template: Template, source_name: str, project: projects.Project | None):
+def document_context(
+    template: Template, source_name: str, project: projects.Project | None, text: str = ""
+):
     return converter.make_context(
         template,
+        title=converter.first_heading(text),
         project=project.meta.name if project else "",
         filename=source_name,
     )
@@ -135,11 +224,12 @@ def notify(message: str) -> None:
     st.toast(message)
 
 
-def set_source(text: str, name: str) -> None:
+def set_source(text: str, name: str, mode: str | None = SOURCE_PASTE) -> None:
     st.session_state["source_text"] = text
     st.session_state["source_name"] = name
     st.session_state["source_rev"] = int(state("source_rev", 0)) + 1
-    st.session_state["pending_source_mode"] = SOURCE_PASTE
+    if mode is not None:
+        st.session_state["pending_source_mode"] = mode
 
 
 def text_field(
@@ -561,24 +651,39 @@ def template_editor(template: Template, project: projects.Project | None) -> Tem
     return template
 
 
-def preview_text(text: str, context: docids.DocIdContext, doc_id: str, pages: int) -> str:
+def preview_text(
+    text: str,
+    context: docids.DocIdContext,
+    doc_id: str,
+    pages: int,
+    fields: dict[str, str] | None = None,
+) -> str:
     prepared = (text or "").replace("{pages}", str(pages or "?"))
     prepared = prepared.replace("{page}", "1")
-    expanded = docids.expand(prepared, context, extra={"doc_id": doc_id}, optional_groups=True)
+    expanded = docids.expand(
+        prepared, context, extra={**(fields or {}), "doc_id": doc_id}, optional_groups=True
+    )
     for token in ("{chapter}", "{section}"):
         expanded = expanded.replace(token, "")
     return " ".join(expanded.split())
 
 
-def page_frame_html(result_html: str, template: Template, doc_id: str, pages: int) -> None:
+def page_frame_html(
+    result_html: str,
+    template: Template,
+    doc_id: str,
+    pages: int,
+    available_px: float = PREVIEW_AVAILABLE_PX,
+) -> None:
     page_width, page_height = template.page.dimensions_mm()
     margins = template.page.margins
     content_width = max(page_width - margins.left - margins.right, 40.0)
     content_height = max(page_height - margins.top - margins.bottom, 40.0)
-    scale = min(1.0, PREVIEW_AVAILABLE_PX / (page_width * MM_TO_PX))
+    scale = min(1.0, available_px / (page_width * MM_TO_PX))
     header = template.document.header
     footer = template.document.footer
     context = document_context(template, "", current_project())
+    fields = converter.document_fields(template, context, doc_id)
     extra: list[str] = [
         "<style>",
         "html { background: #e2e8f0; }",
@@ -593,14 +698,14 @@ def page_frame_html(result_html: str, template: Template, doc_id: str, pages: in
     ]
     bars: list[str] = []
     if header.enabled:
-        text = preview_text(header.text, context, doc_id, pages)
+        text = preview_text(header.text, context, doc_id, pages, fields)
         alignment = header.text_position if header.text_position in HEADER_FOOTER_SLOTS else "right"
         bars.append(
             f'<div class="preview-chrome preview-chrome-top" style="text-align: {alignment}">'
             f"{converter.escape_html(text)}</div>"
         )
     if footer.enabled:
-        text = preview_text(footer.text, context, doc_id, pages)
+        text = preview_text(footer.text, context, doc_id, pages, fields)
         alignment = footer.text_position if footer.text_position in HEADER_FOOTER_SLOTS else "left"
         bars.append(
             f'<div class="preview-chrome preview-chrome-bottom" style="text-align: {alignment}">'
@@ -670,7 +775,7 @@ def convert_sources(
 ) -> list[dict]:
     results: list[dict] = []
     for name, text in sources:
-        context = document_context(template, name, project)
+        context = document_context(template, name, project, text)
         try:
             doc_id = allocate_doc_id(template, context, project)
             result = converter.convert(
@@ -695,7 +800,7 @@ def convert_sources(
             saved_path = str(project.absolute(entry["pdf"]))
         elif save_to_disk and output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
-            target = output_dir / result.output_name
+            target = docids.unique_path(output_dir / result.output_name)
             target.write_bytes(result.pdf_bytes)
             saved_path = str(target)
         results.append(
@@ -783,11 +888,85 @@ def source_panel(template: Template, project: projects.Project | None) -> tuple[
     return [("sample.md", text)], base_dir
 
 
+def pdf_panel(item: dict, height: int) -> None:
+    viewer = getattr(st, "pdf", None)
+    if viewer is not None:
+        try:
+            viewer(item["pdf"], height=height, key=f"pdf_viewer::{item['id']}")
+            return
+        except TypeError:
+            try:
+                viewer(item["pdf"])
+                return
+            except Exception:
+                pass
+        except Exception:
+            pass
+    st.download_button(
+        "Download the PDF",
+        data=item["pdf"],
+        file_name=item["name"],
+        mime="application/pdf",
+        key=f"pdf_download::{item['id']}",
+    )
+    st.warning(
+        "The inline PDF viewer needs Streamlit's pdf component. Install it with "
+        '`pip install "streamlit[pdf]"` to see the pages here.'
+    )
+
+
+def render_preview_section(results: list[dict], template: Template) -> None:
+    st.subheader("Preview")
+    page_width, page_height = template.page.dimensions_mm()
+    width_scale = min(1.0, PREVIEW_AVAILABLE_PX / (page_width * MM_TO_PX))
+    solo_height = int(min(page_height * MM_TO_PX * width_scale, 900.0))
+    if "pending_preview_layout" in st.session_state:
+        pending_layout = str(st.session_state.pop("pending_preview_layout"))
+        if pending_layout in PREVIEW_LAYOUTS:
+            st.session_state["preview_layout"] = pending_layout
+            st.session_state["layout_pref"] = pending_layout
+    elif "preview_layout" not in st.session_state:
+        st.session_state["preview_layout"] = state("layout_pref", PREVIEW_LAYOUTS[0])
+    layout = st.radio("Layout", PREVIEW_LAYOUTS, horizontal=True, key="preview_layout")
+    st.session_state["layout_pref"] = layout
+    if len(results) > 1:
+        labels = [f"{index + 1}. {item['name']}" for index, item in enumerate(results)]
+        chosen = st.selectbox("Document", labels, key=f"preview_document::{len(results)}")
+        item = results[labels.index(chosen)]
+    else:
+        item = results[0]
+    doc_id = item.get("doc_id", "")
+    pages = item.get("pages") or 1
+    st.caption(
+        f"The PDF shows the last conversion of this document ({pages} pages); convert again to see template "
+        "changes. The HTML view on the right re-renders as you edit and approximates the page area, while "
+        "pagination, page numbers and running headings only exist in the PDF."
+    )
+    if layout == "PDF only":
+        pdf_panel(item, solo_height)
+        return
+    if layout == "Preview only":
+        page_frame_html(item["html"], template, doc_id, pages)
+        return
+    pdf_column, html_column = st.columns(2)
+    with pdf_column:
+        st.markdown("**PDF**")
+        pdf_panel(item, solo_height)
+    with html_column:
+        st.markdown("**Live HTML**")
+        page_frame_html(item["html"], template, doc_id, pages, available_px=540.0)
+
+
 def convert_tab(template: Template, project: projects.Project | None) -> None:
     st.subheader("Convert")
     sources, base_dir = source_panel(template, project)
     options = template.document.docid
-    context = document_context(template, sources[0][0] if sources else "", project)
+    context = document_context(
+        template,
+        sources[0][0] if sources else "",
+        project,
+        sources[0][1] if sources else "",
+    )
     doc_id_preview = ""
     if options.enabled and options.pattern.strip():
         doc_id_preview = docids.expand(
@@ -805,15 +984,29 @@ def convert_tab(template: Template, project: projects.Project | None) -> None:
     with columns[2]:
         st.metric("Output name", converter.output_filename(template, context, doc_id_preview))
     if project is None:
-        columns = st.columns([3, 1])
+        if "pending_one_time_output" in st.session_state:
+            st.session_state["one_time_output"] = st.session_state.pop("pending_one_time_output")
+            st.session_state["output_rev"] = int(state("output_rev", 0)) + 1
+        columns = st.columns([3, 1, 1])
         with columns[0]:
             output_value = text_field(
                 "Save a copy to this folder",
                 str(state("one_time_output", str(Path.cwd() / "output"))),
                 "one_time_output_field",
+                key=f"one_time_output_field::{int(state('output_rev', 0))}",
             )
             st.session_state["one_time_output"] = output_value
         with columns[1]:
+            if st.button("Browse…", key="browse_output_button"):
+                chosen, reason = picker.choose_directory(
+                    "Choose the folder for the PDF copy", output_value
+                )
+                if reason:
+                    st.session_state["picker_error"] = reason
+                elif chosen is not None:
+                    st.session_state["pending_one_time_output"] = str(chosen)
+                st.rerun()
+        with columns[2]:
             save_to_disk = st.checkbox("Save copy", value=True, key="one_time_save")
         output_dir = Path(output_value).expanduser()
     else:
@@ -835,13 +1028,7 @@ def convert_tab(template: Template, project: projects.Project | None) -> None:
     render_results(results)
     if results:
         st.divider()
-        st.subheader("Preview")
-        st.caption(
-            "The preview approximates the page area in a browser: page margins, text measure and header "
-            "and footer text are shown, while pagination, page numbers and running headings only exist in the PDF."
-        )
-        first = results[0]
-        page_frame_html(first["html"], template, first.get("doc_id", ""), first.get("pages") or 1)
+        render_preview_section(results, template)
 
 
 def template_tab(template: Template, project: projects.Project | None) -> None:
@@ -889,52 +1076,120 @@ def template_tab(template: Template, project: projects.Project | None) -> None:
     )
 
 
-def project_tab(project: projects.Project | None) -> None:
-    st.subheader("Projects")
+def recent_projects() -> list[Path]:
+    return [item for item in projects.load_recents() if projects.is_project(item)]
+
+
+def known_projects() -> list[Path]:
+    found: list[Path] = []
+    candidates = (
+        recent_projects()
+        + projects.find_projects(projects.default_projects_root())
+        + projects.find_projects(Path.cwd())
+    )
+    for item in candidates:
+        resolved = item.expanduser()
+        if resolved in found or not projects.is_project(resolved):
+            continue
+        found.append(resolved)
+    return found
+
+
+def browse_start() -> Path:
+    candidate = Path(str(state("last_browse_dir", "")) or ".").expanduser()
+    return candidate if candidate.is_dir() else Path.cwd()
+
+
+def open_project_from_dialog() -> None:
+    chosen, reason = picker.choose_directory("Open a project folder", browse_start())
+    if reason:
+        st.session_state["picker_error"] = reason
+        st.rerun()
+        return
+    if chosen is not None and open_project(chosen):
+        st.rerun()
+
+
+def choose_parent_folder() -> None:
+    current = Path(str(state("new_project_parent", "")) or ".").expanduser()
+    chosen, reason = picker.choose_directory(
+        "Choose the folder that will hold the project",
+        current if current.is_dir() else browse_start(),
+    )
+    if reason:
+        st.session_state["picker_error"] = reason
+    elif chosen is not None:
+        st.session_state["pending_new_project_parent"] = str(chosen)
+    st.rerun()
+
+
+def create_project_panel() -> None:
+    st.markdown("**Create a project**")
+    if "pending_new_project_parent" in st.session_state:
+        st.session_state["new_project_parent"] = st.session_state.pop("pending_new_project_parent")
+    state("new_project_name", "Reports")
+    state("new_project_parent", str(projects.default_projects_root()))
+    state("new_project_preset", PRESET_NAMES[0])
+    state("new_project_description", "")
+    name = st.text_input("Project name", key="new_project_name")
+    parent_columns = st.columns([3, 1])
+    with parent_columns[0]:
+        parent = st.text_input("Parent folder", key="new_project_parent")
+    with parent_columns[1]:
+        if st.button("Browse…", key="browse_parent_button"):
+            choose_parent_folder()
+    chosen = st.selectbox("Starting template", PRESET_NAMES, key="new_project_preset")
+    description = st.text_input("Description", key="new_project_description")
+    if st.button("Create project", key="create_project_button"):
+        root = Path(parent).expanduser() / docids.safe_filename(name, fallback="project")
+        template = preset(chosen)
+        template.name = "Default"
+        new_project = projects.Project.create(root, name=name, template=template, description=description)
+        st.session_state["project"] = new_project
+        st.session_state["pending_mode"] = MODE_PROJECT
+        st.session_state["results"] = []
+        set_template(new_project.load_first_template())
+        projects.remember_recent(new_project.root)
+        notify(f"Created project '{new_project.meta.name}' in {new_project.root}.")
+        st.rerun()
+
+
+def open_project_panel() -> None:
+    st.markdown("**Open a project**")
+    path = st.text_input("Project folder", key="open_project_path", placeholder=str(Path.cwd()))
     columns = st.columns(2)
     with columns[0]:
-        st.markdown("**Create a project**")
-        name = st.text_input("Project name", value="Reports", key="new_project_name")
-        parent = st.text_input(
-            "Parent folder", value=str(projects.default_projects_root()), key="new_project_parent"
-        )
-        chosen = st.selectbox("Starting template", PRESET_NAMES, index=0, key="new_project_preset")
-        description = st.text_input("Description", value="", key="new_project_description")
-        if st.button("Create project", key="create_project_button"):
-            root = Path(parent).expanduser() / docids.safe_filename(name, fallback="project")
-            template = preset(chosen)
-            template.name = "Default"
-            new_project = projects.Project.create(
-                root, name=name, template=template, description=description
-            )
-            st.session_state["project"] = new_project
-            st.session_state["pending_mode"] = MODE_PROJECT
-            set_template(new_project.load_first_template())
-            notify(f"Created project '{new_project.meta.name}'.")
-            st.rerun()
-    with columns[1]:
-        st.markdown("**Open a project**")
-        path = st.text_input("Project folder", value="", key="open_project_path", placeholder=str(Path.cwd()))
-        if st.button("Open project", key="open_project_button"):
+        if st.button("Open project", type="primary", key="open_project_button"):
             if open_project(path):
                 st.rerun()
-        candidates = [
-            str(item)
-            for item in projects.find_projects(projects.default_projects_root())
-            + projects.find_projects(Path.cwd())
-        ]
-        if candidates:
-            choice = st.selectbox(
-                "Discovered projects",
-                ["(pick one)"] + candidates,
-                key=f"discovered_project::{len(candidates)}",
-            )
-            if choice != "(pick one)" and st.button("Open discovered project", key="open_discovered_button"):
-                if open_project(choice):
-                    st.rerun()
-        st.caption("Any folder that has a project.json can be opened, including folders you move around.")
+    with columns[1]:
+        if st.button("Browse…", key="browse_project_button"):
+            open_project_from_dialog()
+    found = known_projects()
+    if found:
+        labels = [f"{item.name}  ·  {item}" for item in found]
+        choice = st.selectbox("Projects on this machine", labels, key=f"known_project::{len(found)}")
+        if st.button("Open selected project", key="open_known_button"):
+            if open_project(found[labels.index(choice)]):
+                st.rerun()
+    st.caption(
+        f"Any folder with a {projects.PROJECT_FILE} can be opened, even after you move it. Type a path, "
+        "browse for one, or pick from the list — the template you were editing, its colors and logos, the "
+        "Markdown and the layout all come back."
+    )
+
+
+def project_tab(project: projects.Project | None) -> None:
+    st.subheader("Projects")
     if project is None:
-        st.info("No project is open. Create or open one to keep templates, assets, Markdown and PDFs together.")
+        columns = st.columns(2)
+        with columns[0]:
+            create_project_panel()
+        with columns[1]:
+            open_project_panel()
+        st.info(
+            "No project is open. Create or open one to keep templates, assets, Markdown and PDFs together."
+        )
         return
     st.divider()
     summary = project.summary()
@@ -942,6 +1197,11 @@ def project_tab(project: projects.Project | None) -> None:
     for column, key in zip(metrics, ("templates", "documents", "pdfs", "assets", "next_sequence")):
         column.metric(key.replace("_", " ").title(), summary[key])
     st.code(str(project.root), language=None)
+    st.caption(
+        f"Editing template '{current_template().name}'. The template, the Markdown you are working on, the "
+        f"source mode and the preview layout are kept in {projects.SESSION_FILE} and come back the next time "
+        "you open this project."
+    )
     columns = st.columns(2)
     with columns[0]:
         st.markdown("**Templates in this project**")
@@ -989,7 +1249,7 @@ def project_tab(project: projects.Project | None) -> None:
         else:
             st.caption("No assets yet. Logos referenced by templates live here.")
     st.divider()
-    columns = st.columns(3)
+    columns = st.columns(4)
     with columns[0]:
         if st.button("Rescan output folder", key="rescan_button"):
             added = project.rescan()
@@ -998,8 +1258,12 @@ def project_tab(project: projects.Project | None) -> None:
     with columns[1]:
         st.caption("Next sequence: " + str(project.next_sequence()))
     with columns[2]:
+        if st.button("Switch project…", key="switch_project_button"):
+            open_project_from_dialog()
+    with columns[3]:
         if st.button("Close project", key="close_project_button"):
             st.session_state["project"] = None
+            st.session_state["results"] = []
             st.rerun()
     st.markdown("**Project layout**")
     st.code(
@@ -1013,6 +1277,7 @@ def project_tab(project: projects.Project | None) -> None:
                 f"  {projects.ASSETS_DIR}/          logos, images, any external file",
                 f"  {projects.MANIFEST_FILE}     history of every conversion",
                 f"  {projects.STATE_FILE}        document id counters",
+                f"  {projects.SESSION_FILE}      where you left off in the app",
             ]
         ),
         language=None,
@@ -1078,7 +1343,14 @@ def help_tab() -> None:
         """
 **One-time convert** is for a single document: paste Markdown, load the example, or drop a file.
 **Project workspace** keeps templates, assets, Markdown and PDFs in one folder that you can move, copy
-or put in version control.
+or put in version control. Any folder with a `project.json` is a project, so it can live anywhere, even
+on a drive you move around.
+**Browse** opens your operating system's own folder dialog, the same panel your file manager shows.
+Picking a folder inside a project opens the project above it, and the next dialog starts beside the
+last project you used. Recent projects are also listed next to the path box.
+**Continue where you left off**: reopening a project reloads the template you were editing, including
+its colors, fonts and logos, plus the Markdown, the source mode and the preview layout, from
+`session.json`. The next document id keeps counting where it stopped.
 """
     )
     with st.expander("Setup"):
@@ -1131,6 +1403,17 @@ def sidebar() -> None:
         "Mode", [MODE_ONE_TIME, MODE_PROJECT], key="mode_radio"
     )
     st.sidebar.caption(f"Project: {project.meta.name}" if project else "Project: none open")
+    if project is None:
+        if st.sidebar.button("Open a project…", key="sidebar_browse_project"):
+            st.session_state["pending_mode"] = MODE_PROJECT
+            open_project_from_dialog()
+        recent = recent_projects()
+        if recent:
+            if st.sidebar.button(f"Resume '{recent[0].name}'", key="sidebar_resume_project"):
+                if open_project(recent[0]):
+                    st.rerun()
+    elif st.sidebar.button("Switch project…", key="sidebar_switch_project"):
+        open_project_from_dialog()
     st.sidebar.divider()
     st.sidebar.markdown("**Template**")
     choices: list[str] = []
@@ -1154,6 +1437,9 @@ def sidebar() -> None:
         st.session_state["status"] = f"Saved template '{template.name}'."
         st.rerun()
     st.sidebar.divider()
+    picker_error = st.session_state.pop("picker_error", "")
+    if picker_error:
+        st.sidebar.warning(picker_error)
     status = st.session_state.pop("status", "")
     if status:
         st.sidebar.success(status)
@@ -1165,7 +1451,14 @@ def sidebar() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="md2pdf", page_icon="📄", layout="wide")
+    if native_env.missing_library_paths():
+        hint = native_env.library_path_hint()
+        st.warning(
+            "This process cannot find WeasyPrint's native libraries, so conversion will fail. "
+            f"Relaunch with `{hint}`, or start the app with `md2pdf ui`, which sets it for you."
+        )
     state("mode", MODE_ONE_TIME)
+    state("layout_pref", PREVIEW_LAYOUTS[0])
     state("template", default_template())
     state("template_rev", 0)
     state("session_counters", {})
@@ -1188,6 +1481,8 @@ def main() -> None:
         library_tab(project)
     with tabs[4]:
         help_tab()
+    if project is not None:
+        remember_project_session(project, template)
 
 
 if __name__ == "__main__":

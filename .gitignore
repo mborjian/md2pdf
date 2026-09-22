@@ -63,6 +63,8 @@ logs/
 # md2pdf runtime output
 output/
 .build/
+examples/*.pdf
+.md2pdf-state.json
 *.tmp
 *.bak
 

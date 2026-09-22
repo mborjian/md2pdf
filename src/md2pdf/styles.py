@@ -62,7 +62,6 @@ html {
 body {
   margin: 0;
 }
-$counter_reset
 .document {
   $justify
 }
@@ -83,13 +82,9 @@ h1, h2, h3, h4, h5, h6 {
 }
 h1 {
   font-size: $h1_size;
-  string-set: chapter content();
-  $break_before_h1
 }
 h2 {
   font-size: $h2_size;
-  string-set: section content();
-  $break_before_h2
 }
 h3 {
   font-size: $h3_size;
@@ -103,6 +98,17 @@ h5 {
 h6 {
   font-size: $h6_size;
   color: $muted_color;
+}
+.document h1 {
+  string-set: chapter content();
+  $break_before_h1
+}
+.document h2 {
+  string-set: section content();
+  $break_before_h2
+}
+.document > h1:first-child {
+  break-before: auto;
 }
 $section_numbering
 a {
@@ -351,24 +357,22 @@ COVER_CSS = CSSTemplate(
     """
 .cover {
   page: cover;
-  position: relative;
+  display: table;
   width: $page_width_mm;
   height: $cover_height_mm;
   background: $cover_background;
   background-size: cover;
   background-position: center;
+  text-align: center;
   $cover_break
 }
 .cover-inner {
-  display: table;
-  width: 100%;
-  height: 100%;
-}
-.cover-body {
   display: table-cell;
   vertical-align: $cover_valign;
   padding: $cover_padding;
-  text-align: center;
+}
+.cover-body {
+  display: block;
 }
 .cover-logo {
   width: $cover_logo_width_mm;
@@ -384,12 +388,14 @@ COVER_CSS = CSSTemplate(
   font-size: $cover_title_size;
   margin: 0 0 0.35em;
   color: $heading_color;
+  string-set: chapter content();
 }
 .cover-subtitle {
   font-size: $cover_subtitle_size;
   color: $muted_color;
   margin: 0 0 1.6em;
   font-weight: 400;
+  string-set: section content();
 }
 .cover-meta {
   margin-top: 12mm;
@@ -632,14 +638,19 @@ def _page_rules(
         blocks.append(header_css)
     if footer_css:
         blocks.append(footer_css)
+    offset = max(int(document.first_page_number or 1) - 1, 0)
     if document.cover.enabled:
         cover_margin = "@page cover {\n" f"  size: {page.size_css()};\n  margin: 0;\n"
         if document.cover.background and document.cover.background.startswith("#"):
             cover_margin += f"  background: {document.cover.background};\n"
+        if document.reset_numbering_after_cover:
+            cover_margin += f"  counter-reset: page {offset};\n"
         cover_margin += "}\n"
         blocks.append(cover_margin)
         blocks.append(suppressed_margin_boxes("cover"))
     else:
+        if offset:
+            blocks.append(f"@page :first {{\n  counter-reset: page {offset};\n}}\n")
         hidden = []
         for options in (document.header, document.footer):
             if options.enabled and not options.show_on_first_page:
@@ -647,19 +658,6 @@ def _page_rules(
         if hidden:
             blocks.append(suppressed_margin_boxes(":first"))
     return "\n".join(blocks)
-
-
-def _counter_reset(template: Template) -> str:
-    document = template.document
-    start = int(document.first_page_number or 1)
-    if template.document.cover.enabled and document.reset_numbering_after_cover:
-        target = ".document"
-    else:
-        target = "html"
-    if start <= 1 and target == "html":
-        return ""
-    offset = max(start - 1, 0)
-    return f"{target} {{\n  counter-reset: page {offset};\n}}\n"
 
 
 def build_css(
@@ -670,6 +668,7 @@ def build_css(
     base_dir: str | Path | None = None,
     sequence: int = 1,
     warnings: list[str] | None = None,
+    fields: dict[str, str] | None = None,
 ) -> str:
     theme = template.theme
     document = template.document
@@ -746,8 +745,7 @@ def build_css(
         "watermark_color": document.watermark.color or "#ef4444",
         "watermark_opacity": f"{min(max(float(document.watermark.opacity or 0.09), 0.02), 1.0):g}",
         "watermark_rotate_deg": f"{float(document.watermark.rotate_deg or 0):g}deg",
-        "counter_reset": _counter_reset(template),
-        "extra": {"doc_id": doc_id},
+        "extra": {**(fields or {}), "doc_id": doc_id},
     }
     parts = [
         _page_rules(template, values, context, base_dir, warnings),

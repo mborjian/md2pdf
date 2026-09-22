@@ -36,6 +36,69 @@ def test_open_without_project_file_raises(tmp_path):
         projects.Project.open(tmp_path / "nope")
 
 
+def test_session_round_trip(tmp_path):
+    project = projects.Project.create(tmp_path / "Reports", name="Reports")
+    assert project.load_session() == {}
+    project.save_session({"template": {"name": "Default"}, "source_text": "# Hi\n"})
+    assert project.load_session()["source_text"] == "# Hi\n"
+    assert (project.root / projects.SESSION_FILE).is_file()
+    (project.root / projects.SESSION_FILE).write_text("not json", encoding="utf-8")
+    assert project.load_session() == {}
+
+
+def test_template_digest_follows_the_file(tmp_path):
+    project = projects.Project.create(tmp_path / "Reports", name="Reports")
+    original = project.template_digest("Default")
+    assert len(original) == 40
+    assert project.template_digest("Missing") == ""
+    template = project.load_template("Default")
+    template.theme.accent = "#010203"
+    project.save_template(template)
+    assert project.template_digest("Default") != original
+
+
+def test_browsing_helpers_see_projects_and_skip_hidden_folders(tmp_path):
+    project = projects.Project.create(tmp_path / "Reports", name="Reports")
+    (project.root / ".hidden").mkdir()
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    assert [item.name for item in projects.list_subdirectories(tmp_path)] == ["Reports"]
+    assert [item.name for item in projects.list_subdirectories(project.root)] == [
+        projects.ASSETS_DIR,
+        projects.DOCUMENTS_DIR,
+        projects.OUTPUT_DIR,
+        projects.TEMPLATES_DIR,
+    ]
+    assert projects.list_subdirectories(tmp_path / "missing") == []
+    assert projects.is_project(project.root)
+    assert not projects.is_project(tmp_path)
+
+
+def test_nearest_project_root_walks_up_from_anywhere(tmp_path):
+    project = projects.Project.create(tmp_path / "Reports", name="Reports")
+    nested = project.root / projects.OUTPUT_DIR / "2026"
+    nested.mkdir(parents=True, exist_ok=True)
+    assert projects.nearest_project_root(nested) == project.root
+    assert projects.nearest_project_root(nested / "report.pdf") == project.root
+    assert projects.nearest_project_root(project.root) == project.root
+    assert projects.nearest_project_root(tmp_path) is None
+
+
+def test_recent_projects_are_remembered_newest_first(tmp_path, monkeypatch):
+    monkeypatch.setenv("MD2PDF_HOME", str(tmp_path / "home"))
+    first = projects.Project.create(tmp_path / "One", name="One")
+    second = projects.Project.create(tmp_path / "Two", name="Two")
+    assert projects.load_recents() == []
+    projects.remember_recent(first.root)
+    projects.remember_recent(second.root)
+    assert projects.load_recents() == [second.root, first.root]
+    projects.remember_recent(first.root)
+    assert projects.load_recents() == [first.root, second.root]
+    assert (tmp_path / "home" / projects.RECENTS_FILE).is_file()
+    for index in range(projects.RECENTS_LIMIT + 3):
+        projects.remember_recent(tmp_path / f"P{index}")
+    assert len(projects.load_recents()) == projects.RECENTS_LIMIT
+
+
 def test_template_save_load_rename_and_delete(tmp_path):
     project = projects.Project.create(tmp_path / "Reports", name="Reports")
     template = preset("Classic report")

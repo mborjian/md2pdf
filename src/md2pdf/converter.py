@@ -8,12 +8,14 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
-from . import docids, styles
+from . import docids, native_env, styles
 from .templates import Template
 
 SRC_RE = re.compile(r'(src|href)="([^"]+)"')
 CSS_URL_RE = re.compile(r'url\(\s*"([^"]+)"\s*\)')
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico"}
+ATX_HEADING_RE = re.compile(r"^[ \t]{0,3}#[ \t]+(.*?)[ \t]*#*[ \t]*$")
+FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
 
 GENERATOR = "md2pdf"
 INLINE_SAMPLE = """# Sample document
@@ -66,11 +68,35 @@ def _load_weasyprint():
     try:
         from weasyprint import HTML
     except Exception as exc:
-        raise RuntimeError(
-            "WeasyPrint is not available. Install it with 'pip install -e .' and make "
-            "sure its system libraries (Pango) are present. Details: " + str(exc)
-        ) from exc
+        hint = native_env.library_path_hint()
+        message = (
+            "WeasyPrint cannot load its system libraries (Pango and friends). "
+            "Install them with 'brew install pango libffi' on macOS or "
+            "'apt install libpango-1.0-0 libpangoft2-1.0-0' on Debian. "
+        )
+        if hint:
+            message += f"Restart this process with {hint}, or use 'md2pdf ui'. "
+        raise RuntimeError(message + "Details: " + str(exc)) from exc
     return HTML
+
+
+def first_heading(text: str) -> str:
+    fence = ""
+    for line in (text or "").splitlines():
+        marker = FENCE_RE.match(line)
+        if marker:
+            token = marker.group(1)
+            if not fence:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = ""
+            continue
+        if fence:
+            continue
+        match = ATX_HEADING_RE.match(line)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return ""
 
 
 def make_context(
@@ -117,8 +143,29 @@ def render_markdown(text: str, options) -> tuple[str, str]:
     return body, toc_html
 
 
-def _fill(text: str, context: docids.DocIdContext, doc_id: str) -> str:
-    return docids.expand(text, context, extra={"doc_id": doc_id}, optional_groups=True)
+def document_fields(
+    template: Template,
+    context: docids.DocIdContext,
+    doc_id: str = "",
+) -> dict[str, str]:
+    document = template.document
+    return {
+        "doc_id": doc_id,
+        "title": context.title,
+        "subtitle": document.subtitle,
+        "author": document.author,
+        "company": document.company,
+    }
+
+
+def _fill(
+    text: str,
+    context: docids.DocIdContext,
+    doc_id: str,
+    fields: dict[str, str] | None = None,
+) -> str:
+    extra = {**(fields or {}), "doc_id": doc_id}
+    return docids.expand(text, context, extra=extra, optional_groups=True)
 
 
 def cover_html(
@@ -127,6 +174,7 @@ def cover_html(
     doc_id: str,
     base_dir: str | Path | None,
     warnings: list[str] | None = None,
+    fields: dict[str, str] | None = None,
 ) -> str:
     cover = template.document.cover
     blocks: list[str] = []
@@ -137,24 +185,24 @@ def cover_html(
         warnings.append(f"cover logo not found: {cover.logo}")
     if logo_uri:
         blocks.append(f'<img class="cover-logo" src="{logo_uri}" alt="" />')
-    title = _fill(cover.title, context, doc_id) or context.title
+    title = _fill(cover.title, context, doc_id, fields) or context.title
     if title:
         blocks.append(f'<h1 class="cover-title">{escape_html(title)}</h1>')
-    subtitle = _fill(cover.subtitle, context, doc_id)
+    subtitle = _fill(cover.subtitle, context, doc_id, fields)
     if subtitle:
         blocks.append(f'<p class="cover-subtitle">{escape_html(subtitle)}</p>')
     meta: list[str] = []
-    author = _fill(cover.author, context, doc_id)
+    author = _fill(cover.author, context, doc_id, fields)
     if author:
         meta.append(f"<p>{escape_html(author)}</p>")
-    company = _fill(cover.company, context, doc_id)
+    company = _fill(cover.company, context, doc_id, fields)
     if company:
         meta.append(f"<p>{escape_html(company)}</p>")
     if cover.show_doc_id and doc_id:
         label = escape_html(cover.doc_id_label or "Document ID")
         meta.append(f'<p class="cover-docid">{label}: {escape_html(doc_id)}</p>')
     if cover.show_date:
-        meta.append(f"<p>{escape_html(_fill('{date:%B %d, %Y}', context, doc_id))}</p>")
+        meta.append(f"<p>{escape_html(_fill('{date:%B %d, %Y}', context, doc_id, fields))}</p>")
     if meta:
         blocks.append('<div class="cover-meta">' + "\n".join(meta) + "</div>")
     inner = '<div class="cover-body">\n' + "\n".join(blocks) + "\n</div>"
@@ -184,8 +232,14 @@ def build_html(
     document = template.document
     doc_context = context or docids.DocIdContext()
     messages = warnings if warnings is not None else []
+    fields = document_fields(template, doc_context, doc_id)
     css = styles.build_css(
-        template, doc_id=doc_id, context=doc_context, base_dir=base_dir, warnings=messages
+        template,
+        doc_id=doc_id,
+        context=doc_context,
+        base_dir=base_dir,
+        warnings=messages,
+        fields=fields,
     )
     placements = document.docid.normalized_placements()
     title = document.title or doc_context.title or "Document"
@@ -204,7 +258,7 @@ def build_html(
     head.append(f"<style>\n{css}</style>")
     body: list[str] = []
     if document.cover.enabled:
-        body.append(cover_html(template, doc_context, doc_id, base_dir, messages))
+        body.append(cover_html(template, doc_context, doc_id, base_dir, messages, fields))
     if document.markdown.toc and toc_html:
         body.append('<section class="toc">\n' + toc_html + "\n</section>")
     body.append('<main class="document">\n' + (markdown_html or "") + "\n</main>")

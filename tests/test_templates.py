@@ -65,6 +65,10 @@ def test_extension_names_reflect_toggles():
     assert "toc" in options.extension_names()
 
 
+def test_default_file_name_pattern_avoids_a_duplicate_date():
+    assert default_template().document.output.filename_pattern == "[{doc_id}-]{slug}"
+
+
 def test_doc_id_placements_are_filtered():
     template = default_template()
     template.document.docid.placements = ["nonsense"]

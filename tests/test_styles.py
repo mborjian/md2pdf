@@ -35,6 +35,14 @@ def test_page_number_style_switches_the_counter():
     assert "counter(page, upper-roman)" in css
 
 
+def test_cover_seeds_the_running_headings_before_the_first_heading():
+    css = styles.build_css(preset("Manual with cover"), doc_id="MAN-2026-0001")
+    title_block = css.split(".cover-title {", 1)[1].split("}", 1)[0]
+    subtitle_block = css.split(".cover-subtitle {", 1)[1].split("}", 1)[0]
+    assert "string-set: chapter content();" in title_block
+    assert "string-set: section content();" in subtitle_block
+
+
 def test_running_headings_use_string_set():
     template = default_template()
     template.document.header.text = "{chapter}"
@@ -89,6 +97,40 @@ def test_cover_suppresses_margin_boxes():
     css = styles.build_css(default_template(), doc_id="")
     assert "@page cover {" in css
     assert "content: none;" in css
+
+
+def test_cover_resets_the_page_counter_at_page_level():
+    css = styles.build_css(default_template(), doc_id="")
+    cover_rule = css.split("@page cover {", 1)[1].split("}", 1)[0]
+    assert "counter-reset: page 0;" in cover_rule
+    html_block = css.split("html {", 1)[1].split("}", 1)[0]
+    assert "counter-reset" not in html_block
+    document_block = css.split(".document {", 1)[1].split("}", 1)[0]
+    assert "counter-reset" not in document_block
+
+
+def test_numbering_can_include_the_cover_page():
+    template = default_template()
+    template.document.reset_numbering_after_cover = False
+    css = styles.build_css(template, doc_id="")
+    assert "counter-reset: page" not in css
+
+
+def test_first_page_number_offsets_when_there_is_no_cover():
+    template = default_template()
+    template.document.cover.enabled = False
+    template.document.first_page_number = 5
+    css = styles.build_css(template, doc_id="")
+    assert "@page :first {" in css
+    assert "counter-reset: page 4;" in css
+
+
+def test_document_fields_reach_the_margin_boxes():
+    template = default_template()
+    template.document.header.text = "{author} · {company}"
+    css = styles.build_css(template, doc_id="", fields={"author": "Ada", "company": "Acme"})
+    assert '"Ada' in css
+    assert "Acme" in css
 
 
 def test_table_and_code_options_are_reflected():

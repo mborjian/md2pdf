@@ -7,9 +7,12 @@ name = "md2pdf"
 version = "0.1.0"
 description = "Convert Markdown files to PDF with templates, projects and a Streamlit UI."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "streamlit>=1.36",
+    "markdown>=3.4",
+    "weasyprint>=60",
+    "pygments>=2.15",
+    "streamlit[pdf]>=1.36",
 ]
 
 [project.scripts]

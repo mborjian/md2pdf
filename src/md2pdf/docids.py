@@ -22,6 +22,9 @@ RANDOM_TOKENS = frozenset(
 VALUE_TOKENS = frozenset(
     {
         "title",
+        "subtitle",
+        "author",
+        "company",
         "project",
         "template",
         "filename",
@@ -68,6 +71,9 @@ TOKEN_REFERENCE = (
     ("day", "Current day, default %d."),
     ("week", "ISO week number."),
     ("title", "Document title from settings; the spec is a fallback: {title:Untitled}."),
+    ("subtitle", "Subtitle from document settings."),
+    ("author", "Author from document settings."),
+    ("company", "Company from document settings."),
     ("project", "Project name; the spec is a fallback: {project:ACME}."),
     ("template", "Template name."),
     ("filename", "Source file name including extension."),
@@ -112,6 +118,16 @@ def slugify(value: str, max_length: int = 48, separator: str = "-") -> str:
     if len(text) > max_length:
         text = text[:max_length].rstrip(separator)
     return text or "untitled"
+
+
+def unique_path(path: Path, limit: int = 999) -> Path:
+    if not path.exists():
+        return path
+    for index in range(2, limit + 1):
+        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{path.stem}-{secrets.token_hex(3)}{path.suffix}")
 
 
 def safe_filename(value: str, max_length: int = 120, fallback: str = "document") -> str:
@@ -186,6 +202,9 @@ def _value_map(context: DocIdContext, extra: dict[str, str] | None) -> dict[str,
     title = context.title or stem
     values = {
         "title": context.title,
+        "subtitle": "",
+        "author": "",
+        "company": "",
         "project": context.project,
         "template": context.template,
         "filename": filename,

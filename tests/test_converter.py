@@ -6,6 +6,21 @@ from md2pdf import converter
 from md2pdf.templates import MarkdownOptions, default_template
 
 
+def weasyprint_is_usable() -> bool:
+    try:
+        import weasyprint
+    except Exception:
+        return False
+    return True
+
+
+def weasyprint_skip_reason() -> str:
+    from md2pdf import native_env
+
+    hint = native_env.library_path_hint()
+    return "weasyprint cannot load its system libraries (Pango)" + (f": {hint}" if hint else "")
+
+
 def test_output_filename_follows_the_pattern():
     template = default_template()
     context = converter.make_context(template, title="Release Notes", filename="notes.md")
@@ -14,6 +29,19 @@ def test_output_filename_follows_the_pattern():
     template.document.output.filename_pattern = "[{doc_id}-]{slug}"
     assert converter.output_filename(template, context, "") == "release-notes.pdf"
     assert converter.output_filename(template, converter.make_context(template), "") == "untitled.pdf"
+
+
+def test_first_heading_reads_the_document_title():
+    assert converter.first_heading("# Quarterly engineering report\n\nBody") == (
+        "Quarterly engineering report"
+    )
+    assert converter.first_heading("\n\n## Section only\n") == ""
+    assert converter.first_heading("Text first\n\n# Later title ##\n") == "Later title"
+    assert converter.first_heading("# Title#\n") == "Title"
+    assert converter.first_heading("```\n# not a heading\n```\n# Real\n") == "Real"
+    assert converter.first_heading("~~~python\n# no\n~~~\n") == ""
+    assert converter.first_heading("#\n") == ""
+    assert converter.first_heading("") == ""
 
 
 def test_make_context_falls_back_to_template_fields():
@@ -57,6 +85,25 @@ def test_build_html_respects_disabled_features():
     assert ".watermark" not in css
 
 
+def test_cover_html_expands_document_field_tokens():
+    template = default_template()
+    template.document.cover.subtitle = "{subtitle}"
+    template.document.cover.author = "{author}"
+    template.document.cover.company = "{company}"
+    template.document.subtitle = "Quarterly numbers"
+    template.document.author = "Ada Lovelace"
+    template.document.company = "Acme"
+    context = converter.make_context(template, title="Report", filename="r.md")
+    fields = converter.document_fields(template, context, "DOC-9")
+    html = converter.cover_html(template, context, "DOC-9", None, None, fields)
+    assert "Quarterly numbers" in html
+    assert "Ada Lovelace" in html
+    assert "Acme" in html
+    assert "{subtitle}" not in html
+    assert "{author}" not in html
+    assert "{company}" not in html
+
+
 def test_cover_html_expands_document_tokens():
     template = default_template()
     template.document.cover.subtitle = "{project} · {doc_id}"
@@ -95,10 +142,46 @@ def test_render_markdown_syntax_highlighting():
     assert "codehilite" in body
 
 
+def page_texts(document) -> list[list[str]]:
+    pages = []
+    for page in document.pages:
+        collected = []
+        for box in page._page_box.descendants():
+            value = getattr(box, "text", None)
+            if isinstance(value, str) and value.strip():
+                collected.append(value.strip())
+        pages.append(collected)
+    return pages
+
+
+def test_cover_stays_on_one_page_and_keeps_the_footer_off():
+    pytest.importorskip("markdown")
+    if not weasyprint_is_usable():
+        pytest.skip(weasyprint_skip_reason())
+    from weasyprint import HTML
+
+    from md2pdf.templates import preset
+
+    template = preset("Manual with cover")
+    template.document.title = "Quarterly report"
+    template.document.subtitle = "Q3 numbers"
+    context = converter.make_context(template, filename="report.md")
+    body, toc = converter.render_markdown("# Head\n\nSome text.\n", template.document.markdown)
+    html, _ = converter.build_html(body, template, doc_id="DOC-1", context=context, toc_html=toc)
+    document = HTML(string=html).render()
+    pages = page_texts(document)
+    assert any("Quarterly report" in item for item in pages[0])
+    assert any("Q3 numbers" in item for item in pages[0])
+    assert any("DOC-1" in item for item in pages[0])
+    assert not any("Page" in item for item in pages[0])
+    assert any("Head" in item for item in pages[1] + pages[2])
+
+
 def test_full_conversion_produces_a_pdf(tmp_path):
     pytest.importorskip("markdown")
-    pytest.importorskip("weasyprint")
-    result = converter.convert("# Title\n\nHello.", default_template(), doc_id="DOC-1")
+    if not weasyprint_is_usable():
+        pytest.skip(weasyprint_skip_reason())
+    result = converter.convert("# Title\n\nHello.", default_template(), doc_id="DOC-1", base_dir=tmp_path)
     assert result.pdf_bytes.startswith(b"%PDF")
     assert result.page_count >= 1
     assert result.output_name.endswith(".pdf")

@@ -41,7 +41,7 @@ Footers use `{page}` and `{pages}` tokens, so the same template works for one pa
 3. Never reuse a document id inside a project.
 
 !!! note "Admonitions"
-    Block quotes, admonitions and tables all pick up the accent colour from the theme.
+    Block quotes, admonitions and tables all pick up the accent color from the theme.
 
 Term
 : Definition lists are supported as well.

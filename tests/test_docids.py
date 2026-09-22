@@ -67,6 +67,21 @@ def test_counter_and_random_detection():
     assert docids.uses_random("DOC-{seq:3}") is False
 
 
+def test_document_field_tokens_are_known():
+    assert docids.unknown_tokens("{subtitle}-{author}-{company}") == []
+    assert docids.expand("{author:Unknown}", docids.DocIdContext(), extra={"author": ""}) == "Unknown"
+    assert docids.expand("{author:Unknown}", docids.DocIdContext(), extra={"author": "Ada"}) == "Ada"
+
+
+def test_unique_path_never_overwrites(tmp_path):
+    target = tmp_path / "report.pdf"
+    assert docids.unique_path(target) == target
+    target.write_bytes(b"x")
+    assert docids.unique_path(target).name == "report-2.pdf"
+    (tmp_path / "report-2.pdf").write_bytes(b"x")
+    assert docids.unique_path(target).name == "report-3.pdf"
+
+
 def test_safe_filename_strips_path_characters():
     assert docids.safe_filename("a/b:c*d.pdf") == "a-b-c-d.pdf"
     assert docids.safe_filename("   ") == "document"
