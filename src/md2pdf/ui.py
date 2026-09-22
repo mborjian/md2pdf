@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import re
 from pathlib import Path
 
@@ -73,6 +74,44 @@ def current_project() -> projects.Project | None:
     return value if isinstance(value, projects.Project) else None
 
 
+def current_edit_entry(project: projects.Project | None) -> dict | None:
+    if project is None:
+        return None
+    entry_id = str(st.session_state.get("editing_id") or "")
+    return project.entry(entry_id) if entry_id else None
+
+
+def editing_enabled(project: projects.Project | None) -> bool:
+    if current_edit_entry(project) is None:
+        return False
+    return bool(st.session_state.get("update_in_place", True))
+
+
+def begin_editing(project: projects.Project, entry: dict | None) -> None:
+    if not entry:
+        stop_editing()
+        return
+    st.session_state["editing_id"] = entry.get("id", "")
+    st.session_state["pending_update_in_place"] = True
+
+
+def stop_editing() -> None:
+    st.session_state["editing_id"] = ""
+    st.session_state["pending_update_in_place"] = False
+    st.session_state.pop("project_document", None)
+
+
+def apply_pending_edit_flag() -> None:
+    if "pending_update_in_place" in st.session_state:
+        st.session_state["update_in_place"] = bool(st.session_state.pop("pending_update_in_place"))
+    state("update_in_place", True)
+
+
+def source_fingerprint(text: str, template: Template, doc_id: str) -> str:
+    payload = "\n".join([text or "", template.to_json(), doc_id or ""])
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
 def session_snapshot(template: Template, project: projects.Project) -> dict:
     names = project.template_names()
     source = template.name if template.name in names else ""
@@ -85,6 +124,7 @@ def session_snapshot(template: Template, project: projects.Project) -> dict:
         "source_name": str(st.session_state.get("source_name", "")),
         "source_text": str(st.session_state.get("source_text", ""))[:200000],
         "preview_layout": str(st.session_state.get("layout_pref", PREVIEW_LAYOUTS[0])),
+        "editing_id": str(st.session_state.get("editing_id") or ""),
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -136,6 +176,12 @@ def apply_project_session(project: projects.Project) -> None:
     if layout in PREVIEW_LAYOUTS:
         st.session_state["layout_pref"] = layout
         st.session_state["pending_preview_layout"] = layout
+    entry_id = str(data.get("editing_id") or "")
+    stored_entry = project.entry(entry_id) if entry_id else None
+    if stored_entry is not None:
+        begin_editing(project, stored_entry)
+    else:
+        stop_editing()
     st.session_state["results"] = []
     st.session_state["session_written"] = {
         "root": str(project.root),
@@ -558,6 +604,9 @@ def template_editor(template: Template, project: projects.Project | None) -> Tem
             markdown_options.page_break_before_h2 = checkbox_field(
                 "Page break before h2", markdown_options.page_break_before_h2, "md_break_h2"
             )
+            markdown_options.page_breaks = checkbox_field(
+                "Page break markers (\newpage)", markdown_options.page_breaks, "md_page_breaks"
+            )
 
     with tabs[7]:
         options = document.docid
@@ -691,6 +740,9 @@ def page_frame_html(
         f"{margins.right:g}mm {margins.bottom:g}mm {margins.left:g}mm; background: #ffffff; "
         f"box-shadow: 0 1px 4px rgba(15, 23, 42, 0.22); position: relative; zoom: {scale:.3f}; }}",
         ".preview-chrome { position: absolute; font-size: 8pt; color: #64748b; }",
+        ".page-break { position: relative; border-top: 2px dashed #94a3b8; margin: 16px 0; height: 0; }",
+        ".page-break::after { content: \"page break\"; position: absolute; right: 0; top: -1.1em; "
+        "font-size: 8pt; color: #64748b; }",
         f".preview-chrome-top {{ top: {margins.top * 0.35:g}mm; left: {margins.left:g}mm; right: {margins.right:g}mm; }}",
         f".preview-chrome-bottom {{ bottom: {margins.bottom * 0.35:g}mm; left: {margins.left:g}mm; "
         f"right: {margins.right:g}mm; }}",
@@ -735,6 +787,8 @@ def render_results(results: list[dict]) -> None:
         label = item["name"]
         if item.get("doc_id"):
             label += f"  ·  {item['doc_id']}"
+        if item.get("updated"):
+            label += "  ·  updated in place"
         with st.expander(label, expanded=index == 0):
             columns = st.columns([2, 1, 1])
             with columns[0]:
@@ -772,12 +826,17 @@ def convert_sources(
     base_dir: Path,
     save_to_disk: bool = False,
     output_dir: Path | None = None,
+    edit: dict | None = None,
 ) -> list[dict]:
     results: list[dict] = []
     for name, text in sources:
         context = document_context(template, name, project, text)
         try:
-            doc_id = allocate_doc_id(template, context, project)
+            doc_id = ""
+            if edit is not None:
+                doc_id = str(edit.get("doc_id") or "")
+            if not doc_id:
+                doc_id = allocate_doc_id(template, context, project)
             result = converter.convert(
                 text, template, doc_id=doc_id, context=context, base_dir=base_dir
             )
@@ -785,7 +844,23 @@ def convert_sources(
             st.error(f"{name}: {exc}")
             continue
         saved_path = ""
-        if project is not None:
+        entry: dict | None = None
+        if project is not None and edit is not None:
+            entry = project.update_conversion(
+                str(edit.get("id") or ""),
+                text,
+                pdf_bytes=result.pdf_bytes,
+                output_name=result.output_name,
+                doc_id=doc_id,
+                title=context.title,
+                template_name=template.name,
+                source_name=name,
+                page_count=result.page_count,
+                save_markdown=template.document.output.save_markdown,
+            )
+        if entry is not None:
+            saved_path = str(project.absolute(entry["pdf"]))
+        elif project is not None:
             entry = project.save_conversion(
                 text,
                 pdf_bytes=result.pdf_bytes,
@@ -814,9 +889,24 @@ def convert_sources(
                 "pages": result.page_count,
                 "warnings": result.warnings,
                 "saved_path": saved_path,
+                "entry_id": str(entry.get("id") or "") if entry else "",
+                "updated": bool(entry and edit is not None),
             }
         )
     return results
+
+
+def source_editor(text: str, name: str, key: str) -> str:
+    value = st.text_area(
+        "Markdown",
+        value=text or "",
+        height=320,
+        key=source_key(key),
+        placeholder="# Title\n\nWrite or paste Markdown here.",
+    )
+    st.session_state["source_text"] = value
+    st.session_state["source_name"] = name
+    return value
 
 
 def source_panel(template: Template, project: projects.Project | None) -> tuple[list[tuple[str, str]], Path]:
@@ -832,14 +922,7 @@ def source_panel(template: Template, project: projects.Project | None) -> tuple[
     )
     base_dir = project.root if project is not None else Path.cwd()
     if mode == SOURCE_PASTE:
-        text = st.text_area(
-            "Markdown",
-            value=state("source_text", ""),
-            height=320,
-            key=source_key("paste_area"),
-            placeholder="# Title\n\nWrite or paste Markdown here.",
-        )
-        st.session_state["source_text"] = text
+        text = source_editor(state("source_text", ""), state("source_name", "pasted.md"), "paste_area")
         name = text_field(
             "Source file name",
             state("source_name", "pasted.md"),
@@ -863,29 +946,82 @@ def source_panel(template: Template, project: projects.Project | None) -> tuple[
                 st.warning(f"{upload.name}: {exc}")
         if uploads:
             st.caption(f"{len(sources)} file(s) ready.")
+            if st.button("Edit the text in the editor", key="edit_upload_button"):
+                set_source(sources[0][1], sources[0][0])
+                st.rerun()
         return sources, base_dir
     if mode == SOURCE_PROJECT:
         if project is None:
-            st.info("Open a project to convert one of its Markdown documents.")
+            st.info("Open a project to edit one of its Markdown documents.")
             return [], base_dir
         documents = project.documents()
         if not documents:
-            st.info("No Markdown documents in this project yet.")
+            st.info("No Markdown documents in this project yet. Convert something first.")
             return [], project.root
         choices = [project.relative(path) for path in documents]
-        choice = st.selectbox("Document", choices, key=f"project_document::{len(choices)}")
-        path = project.absolute(choice)
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            st.error(str(exc))
-            return [], project.root
-        return [(Path(choice).name, text)], project.root
+        choice = st.selectbox("Document", choices, key=f"project_document_choice::{len(choices)}")
+        if str(state("project_document", "")) != choice:
+            try:
+                loaded = project.absolute(choice).read_text(encoding="utf-8")
+            except OSError as exc:
+                st.error(str(exc))
+                return [], project.root
+            begin_editing(project, project.entry_for_markdown(choice))
+            st.session_state["source_text"] = loaded
+            st.session_state["source_name"] = Path(choice).name
+            st.session_state["source_rev"] = int(state("source_rev", 0)) + 1
+            st.session_state["project_document"] = choice
+        name = Path(choice).name
+        text = source_editor(str(state("source_text", "")), name, "project_area")
+        notes = st.columns([3, 1])
+        entry = current_edit_entry(project)
+        with notes[0]:
+            if entry is not None:
+                st.caption(
+                    f"Editing {entry.get('doc_id') or entry.get('title') or 'this document'} in place: "
+                    "converting updates this document instead of adding a copy."
+                )
+            else:
+                st.caption("This file is not in the project history yet, so converting adds a new document.")
+        with notes[1]:
+            if st.button("Reload from file", key="reload_document_button"):
+                st.session_state["project_document"] = ""
+                st.rerun()
+        return [(name, text)] if text.strip() else [], project.root
     text = converter.example_markdown_text()
     st.caption("A small sample document that exercises tables, code blocks, quotes and footnotes.")
-    with st.expander("Preview the sample", expanded=False):
-        st.code(text, language="markdown")
+    columns = st.columns([3, 1])
+    with columns[0]:
+        with st.expander("Preview the sample", expanded=False):
+            st.code(text, language="markdown")
+    with columns[1]:
+        if st.button("Edit the text in the editor", key="edit_example_button"):
+            set_source(text, "sample.md")
+            st.rerun()
     return [("sample.md", text)], base_dir
+
+
+def page_break_tools(text: str, name: str, mode: str) -> None:
+    blocks = [block for block in converter.markdown_blocks(text) if block.start > 0]
+    with st.expander("Page breaks", expanded=False):
+        st.caption(
+            "A line with `\newpage` or `<!-- pagebreak -->` starts a new page. Put one above a table or a "
+            "section that should not be split; the live preview marks it with a dashed line."
+        )
+        if not blocks:
+            st.caption("More Markdown, and the places you can break before, show up here.")
+            return
+        labels = [f"{'✓ ' if block.has_break else ''}{block.label()}" for block in blocks]
+        choice = st.selectbox("Insert a page break above", labels, key=f"break_choice::{len(labels)}")
+        columns = st.columns([1, 2])
+        with columns[0]:
+            if st.button("Insert page break", key="insert_break_button"):
+                block = blocks[labels.index(choice)]
+                set_source(converter.insert_page_break(text, block.start), name, mode=mode)
+                notify("Page break inserted.")
+                st.rerun()
+        with columns[1]:
+            st.caption("The marker is plain text, so it survives a round trip through any editor.")
 
 
 def pdf_panel(item: dict, height: int) -> None:
@@ -915,11 +1051,60 @@ def pdf_panel(item: dict, height: int) -> None:
     )
 
 
-def render_preview_section(results: list[dict], template: Template) -> None:
-    st.subheader("Preview")
+def preview_height(template: Template) -> int:
     page_width, page_height = template.page.dimensions_mm()
     width_scale = min(1.0, PREVIEW_AVAILABLE_PX / (page_width * MM_TO_PX))
-    solo_height = int(min(page_height * MM_TO_PX * width_scale, 900.0))
+    return int(min(page_height * MM_TO_PX * width_scale, 900.0))
+
+
+def render_preview_pdf(
+    text: str,
+    template: Template,
+    context: docids.DocIdContext,
+    base_dir: Path,
+    doc_id: str,
+    fingerprint: str,
+) -> dict:
+    try:
+        result = converter.convert(text, template, doc_id=doc_id, context=context, base_dir=base_dir)
+    except (RuntimeError, ValueError, OSError) as exc:
+        return {
+            "id": "preview",
+            "fingerprint": fingerprint,
+            "pdf": b"",
+            "pages": 0,
+            "name": "",
+            "doc_id": doc_id,
+            "error": str(exc),
+        }
+    return {
+        "id": "preview",
+        "fingerprint": fingerprint,
+        "pdf": result.pdf_bytes,
+        "pages": result.page_count,
+        "name": result.output_name,
+        "doc_id": doc_id,
+        "html": result.html,
+        "warnings": result.warnings,
+        "rendered": datetime.datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+def preview_item_from_result(item: dict, text: str, template: Template, doc_id: str) -> dict:
+    return {
+        "id": "preview",
+        "fingerprint": source_fingerprint(text, template, doc_id),
+        "pdf": item["pdf"],
+        "pages": item.get("pages") or 0,
+        "name": item["name"],
+        "doc_id": item.get("doc_id", doc_id),
+        "html": item.get("html", ""),
+        "warnings": item.get("warnings") or [],
+        "saved": True,
+    }
+
+
+def preview_layout_choice() -> str:
     if "pending_preview_layout" in st.session_state:
         pending_layout = str(st.session_state.pop("pending_preview_layout"))
         if pending_layout in PREVIEW_LAYOUTS:
@@ -929,44 +1114,76 @@ def render_preview_section(results: list[dict], template: Template) -> None:
         st.session_state["preview_layout"] = state("layout_pref", PREVIEW_LAYOUTS[0])
     layout = st.radio("Layout", PREVIEW_LAYOUTS, horizontal=True, key="preview_layout")
     st.session_state["layout_pref"] = layout
-    if len(results) > 1:
-        labels = [f"{index + 1}. {item['name']}" for index, item in enumerate(results)]
-        chosen = st.selectbox("Document", labels, key=f"preview_document::{len(results)}")
-        item = results[labels.index(chosen)]
-    else:
-        item = results[0]
-    doc_id = item.get("doc_id", "")
-    pages = item.get("pages") or 1
-    st.caption(
-        f"The PDF shows the last conversion of this document ({pages} pages); convert again to see template "
-        "changes. The HTML view on the right re-renders as you edit and approximates the page area, while "
-        "pagination, page numbers and running headings only exist in the PDF."
-    )
-    if layout == "PDF only":
-        pdf_panel(item, solo_height)
+    return layout
+
+
+def preview_panel(
+    sources: list[tuple[str, str]],
+    template: Template,
+    base_dir: Path,
+    context: docids.DocIdContext,
+    doc_id: str,
+) -> None:
+    st.subheader("Preview")
+    if not sources:
+        st.caption("Drop, paste or load Markdown and the live preview appears here, beside the source.")
         return
-    if layout == "Preview only":
-        page_frame_html(item["html"], template, doc_id, pages)
+    text = sources[0][1]
+    layout = preview_layout_choice()
+    fingerprint = source_fingerprint(text, template, doc_id)
+    preview = st.session_state.get("preview_pdf") or {}
+    results = st.session_state.get("results") or []
+    controls = st.columns([1, 1, 2])
+    with controls[0]:
+        refresh = st.button("Update PDF preview", key="refresh_preview_button")
+    with controls[1]:
+        auto = st.checkbox("Keep it current", value=True, key="auto_preview")
+    if refresh or (auto and preview.get("fingerprint") != fingerprint):
+        with st.spinner("Rendering the PDF preview…"):
+            preview = render_preview_pdf(text, template, context, base_dir, doc_id, fingerprint)
+        st.session_state["preview_pdf"] = preview
+    pages = int(preview.get("pages") or 0)
+    if preview.get("error"):
+        st.warning(f"PDF preview: {preview['error']}")
+    fallback = dict(results[0]) if results else None
+    item = dict(preview) if preview.get("pdf") else fallback
+    if item is not None:
+        item["pages"] = int(preview.get("pages") or item.get("pages") or 0)
+        pages = int(item["pages"]) or pages
+    with controls[2]:
+        if item is None:
+            st.caption("No PDF yet. Add Markdown, then convert.")
+        elif preview.get("pdf"):
+            stamp = f", rendered {preview['rendered']}" if preview.get("rendered") else ""
+            st.caption(f"PDF preview: {pages} page(s){stamp}. Convert to save it.")
+        else:
+            st.caption(f"Showing the last saved PDF ({item['name']}); the live render failed.")
+    html, _, _ = converter.render_document(
+        text, template, doc_id=doc_id, context=context, base_dir=base_dir
+    )
+    html_pages = pages or 1
+    if layout == "PDF only" and item is not None:
+        pdf_panel(item, preview_height(template))
+        return
+    if layout == "Preview only" or item is None:
+        page_frame_html(html, template, doc_id, html_pages)
         return
     pdf_column, html_column = st.columns(2)
     with pdf_column:
         st.markdown("**PDF**")
-        pdf_panel(item, solo_height)
+        pdf_panel(item, preview_height(template))
     with html_column:
         st.markdown("**Live HTML**")
-        page_frame_html(item["html"], template, doc_id, pages, available_px=540.0)
+        page_frame_html(html, template, doc_id, html_pages, available_px=540.0)
 
 
 def convert_tab(template: Template, project: projects.Project | None) -> None:
     st.subheader("Convert")
     sources, base_dir = source_panel(template, project)
+    mode = str(state("source_mode", SOURCE_PASTE))
+    name, text = sources[0] if sources else ("", "")
     options = template.document.docid
-    context = document_context(
-        template,
-        sources[0][0] if sources else "",
-        project,
-        sources[0][1] if sources else "",
-    )
+    context = document_context(template, name, project, text)
     doc_id_preview = ""
     if options.enabled and options.pattern.strip():
         doc_id_preview = docids.expand(
@@ -976,6 +1193,13 @@ def convert_tab(template: Template, project: projects.Project | None) -> None:
             extra={"doc_id": ""},
             optional_groups=True,
         ).strip()
+    if project is not None:
+        apply_pending_edit_flag()
+    edit_entry = current_edit_entry(project)
+    if edit_entry is not None and str(edit_entry.get("doc_id") or ""):
+        doc_id_preview = str(edit_entry["doc_id"])
+    if text.strip() and mode in (SOURCE_PASTE, SOURCE_PROJECT):
+        page_break_tools(text, name, mode)
     columns = st.columns(3)
     with columns[0]:
         st.metric("Template", template.name)
@@ -983,6 +1207,7 @@ def convert_tab(template: Template, project: projects.Project | None) -> None:
         st.metric("Document id", doc_id_preview or "disabled")
     with columns[2]:
         st.metric("Output name", converter.output_filename(template, context, doc_id_preview))
+    preview_panel(sources, template, base_dir, context, doc_id_preview)
     if project is None:
         if "pending_one_time_output" in st.session_state:
             st.session_state["one_time_output"] = st.session_state.pop("pending_one_time_output")
@@ -1013,22 +1238,53 @@ def convert_tab(template: Template, project: projects.Project | None) -> None:
         save_to_disk = False
         output_dir = None
         st.caption(f"PDFs and Markdown copies are written inside {project.root}.")
+        if edit_entry is not None:
+            columns = st.columns([3, 2])
+            with columns[0]:
+                st.info(
+                    f"Editing {edit_entry.get('doc_id') or edit_entry.get('title') or 'this document'}: "
+                    f"converting overwrites {edit_entry.get('pdf')} instead of adding a second copy."
+                )
+            with columns[1]:
+                st.checkbox("Update that document in place", key="update_in_place")
+                if st.button("Stop editing and save new copies", key="stop_editing_button"):
+                    stop_editing()
+                    st.rerun()
     disabled = not sources
     if st.button("Convert to PDF", type="primary", disabled=disabled, key="convert_button"):
+        edit = edit_entry if editing_enabled(project) else None
         with st.spinner("Rendering PDF..."):
             results = convert_sources(
-                sources, template, project, base_dir, bool(save_to_disk), output_dir
+                sources, template, project, base_dir, bool(save_to_disk), output_dir, edit
             )
         st.session_state["results"] = results
         if results:
-            st.session_state["status"] = f"Converted {len(results)} document(s)."
+            message = (
+                f"Updated {results[0]['name']} in place."
+                if results[0].get("updated")
+                else f"Converted {len(results)} document(s)."
+            )
+            st.session_state["preview_pdf"] = preview_item_from_result(
+                results[0], text, template, doc_id_preview
+            )
+            adopted = None
+            if project is not None and not results[0].get("updated"):
+                adopted = project.entry(str(results[0].get("entry_id") or ""))
+                if adopted is not None:
+                    begin_editing(project, adopted)
+                    label = adopted.get("doc_id") or adopted.get("pdf")
+                    message += (
+                        f" Editing {label} from now on: the next conversion updates it instead of adding "
+                        "a copy."
+                    )
+            st.session_state["status"] = message
+            if adopted is not None:
+                st.rerun()
+            st.toast(message)
     if disabled:
         st.caption("Add Markdown first: paste text, drop a file, or load the example.")
     results = st.session_state.get("results") or []
     render_results(results)
-    if results:
-        st.divider()
-        render_preview_section(results, template)
 
 
 def template_tab(template: Template, project: projects.Project | None) -> None:
@@ -1264,6 +1520,7 @@ def project_tab(project: projects.Project | None) -> None:
         if st.button("Close project", key="close_project_button"):
             st.session_state["project"] = None
             st.session_state["results"] = []
+            stop_editing()
             st.rerun()
     st.markdown("**Project layout**")
     st.code(
@@ -1322,11 +1579,13 @@ def library_tab(project: projects.Project | None) -> None:
                 key=f"library_download_{index}_{entry.get('id')}",
             )
         with columns[2]:
-            if st.button("Open Markdown", key=f"library_open_{index}_{entry.get('id')}"):
+            if st.button("Edit", key=f"library_open_{index}_{entry.get('id')}"):
                 text = project.read_entry_markdown(entry)
                 if text:
+                    begin_editing(project, entry)
+                    st.session_state["project_document"] = entry.get("markdown", "")
                     set_source(text, Path(entry.get("markdown", "document.md")).name)
-                    notify("Markdown loaded into the editor.")
+                    notify("Opened for editing: converting updates this document.")
                     st.rerun()
                 else:
                     st.warning("No Markdown copy for that entry.")
@@ -1351,6 +1610,11 @@ last project you used. Recent projects are also listed next to the path box.
 **Continue where you left off**: reopening a project reloads the template you were editing, including
 its colors, fonts and logos, plus the Markdown, the source mode and the preview layout, from
 `session.json`. The next document id keeps counting where it stopped.
+**Page breaks**: a line with `\newpage` (or `<!-- pagebreak -->`) starts a new page. The **Page breaks**
+panel in the Convert tab inserts one above any heading, table, list or code block you pick, and the live
+preview draws a dashed line where the page ends.
+**Editing an old document**: open it from the Library or from the project documents in the source panel,
+edit it, and converting updates that document in place — same id, same file names, no duplicate.
 """
     )
     with st.expander("Setup"):

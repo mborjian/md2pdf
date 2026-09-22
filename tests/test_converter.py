@@ -2,8 +2,62 @@ from __future__ import annotations
 
 import pytest
 
-from md2pdf import converter
+from md2pdf import converter, styles
 from md2pdf.templates import MarkdownOptions, default_template
+
+
+def test_page_break_markers_become_page_breaks():
+    text = "# Title\n\nbefore\n\n\\newpage\n\nafter\n"
+    html, _, _ = converter.render_document(text, default_template(), doc_id="")
+    assert html.count('class="page-break"') == 1
+    assert "\\newpage" not in html
+    assert 'class="page-break"' in converter.apply_page_breaks(text)
+    assert converter.is_page_break("<!-- pagebreak -->")
+    assert converter.is_page_break("\\pagebreak")
+    assert not converter.is_page_break("text \\newpage")
+
+
+def test_page_break_markers_skip_code_and_can_be_switched_off():
+    text = "# Title\n\n```\n\\newpage\n```\n\n<!-- pagebreak -->\n\nend\n"
+    template = default_template()
+    html, _, _ = converter.render_document(text, template, doc_id="")
+    assert html.count('class="page-break"') == 1
+    assert "\\newpage" in html
+    template.document.markdown.page_breaks = False
+    html, _, _ = converter.render_document(text, template, doc_id="")
+    assert html.count('class="page-break"') == 0
+
+
+def test_blocks_describe_what_can_be_broken_before():
+    text = "# Title\n\nintro\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n## End\n\n```\ncode()\n```\n"
+    blocks = converter.markdown_blocks(text)
+    assert [block.kind for block in blocks] == ["h1 heading", "paragraph", "table", "h2 heading", "code"]
+    table = blocks[2]
+    assert table.heading == "Title"
+    assert table.preview == "| A | B |"
+    assert not table.has_break
+    assert blocks[-1].preview == "code()"
+    assert "line 5" in table.label()
+
+
+def test_inserting_a_page_break_marks_the_block_it_precedes():
+    text = "# Title\n\nintro\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n## End\n"
+    table = converter.markdown_blocks(text)[2]
+    updated = converter.insert_page_break(text, table.start)
+    lines = updated.splitlines()
+    moved = converter.markdown_blocks(updated)[2]
+    above = [line for line in lines[: moved.start] if line.strip()]
+    assert above[-1] == converter.PAGE_BREAK_TEXT
+    rebuilt = converter.markdown_blocks(updated)
+    assert [block.kind for block in rebuilt] == ["h1 heading", "paragraph", "table", "h2 heading"]
+    assert rebuilt[2].has_break
+    assert not rebuilt[3].has_break
+    assert updated.endswith("\n")
+
+
+def test_the_stylesheet_carries_the_page_break_rule():
+    css = styles.build_css(default_template(), doc_id="")
+    assert ".page-break {\n  break-after: page;\n}" in css
 
 
 def weasyprint_is_usable() -> bool:

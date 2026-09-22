@@ -8,6 +8,9 @@ paginated, stylesheet-driven PDF.
 
 - Streamlit UI with two modes: a **one-time convert** and a **project workspace**
 - Paste Markdown, drag and drop files, load the bundled example, or reopen a document you converted earlier
+- A live preview beside the editor: the HTML follows every keystroke and an automatically refreshed PDF shows
+  real pagination, so a page break or a style tweak can be judged before converting
+- Page breaks anywhere: a `\newpage` line, or one inserted above any heading, table, list or code block
 - Templates stored as JSON: page size and margins, fonts and colours, tables, code highlighting,
   header and footer, cover page, watermark, table of contents, custom CSS
 - Header and footer margin boxes with logos, running chapter names and page numbers (`1 / 7`, roman, alpha)
@@ -49,14 +52,29 @@ puts Homebrew's `lib` on the dynamic loader path before starting Python, so Weas
 
 ### One-time convert
 
-1. Pick a source: paste Markdown, drop one or more `.md` files, load the example, or convert a
-   document that already lives in an open project.
-2. Optionally tick **Save copy** and choose a folder — type it or press **Browse…** for the system
-   folder dialog. Without it, nothing is written to disk and the result is only offered as a download.
-3. Press **Convert to PDF**. The Preview panel then shows the rendered PDF next to the live HTML
-   view, so a template change can be judged in one click: convert again and the two panes update
-   together. The layout selector switches between **PDF and preview**, **PDF only** and **Preview
-   only**, and the PDF is also offered as a download.
+1. Pick a source: paste Markdown, drop one or more `.md` files, load the example, or open a document
+   that lives in an open project. Uploads and the example have an **Edit the text in the editor**
+   button, which moves the text into the editor so everything below works on it.
+2. Watch the **Preview** panel beside it: the HTML view updates on every edit, and with **Keep it
+   current** ticked the PDF pane re-renders by itself, so pagination is visible while you work. The
+   layout selector switches between **PDF and preview**, **PDF only** and **Preview only**.
+3. Add **page breaks** where you want them — see below — and keep editing until the pages look right.
+4. Press **Convert to PDF** to save the result. Optionally tick **Save copy** first and choose a
+   folder: type it or press **Browse…** for the system folder dialog. Without it, nothing is written
+   to disk and the result is only offered as a download.
+
+### Page breaks
+
+A line with `\newpage` (or `<!-- pagebreak -->`; `\pagebreak` works too) starts a new page. Type it
+anywhere in the Markdown, or open the **Page breaks** panel in the Convert tab and pick what it should
+come before: every heading, table, list, quote, code block and paragraph is listed with its line
+number, its kind and the heading it sits under. Blocks that already have a break above them are marked
+with a check, and inserting is plain text insertion, so the marker survives a round trip through any
+editor. Inside fenced code blocks markers are left alone, and the template's **Page break markers**
+switch (Markdown tab) can turn the whole feature off for a document that contains literal text.
+
+The live preview draws a dashed line labelled *page break* where the page will end. That is the honest
+limit of an HTML view: it shows where the break is, while the PDF pane shows what it did to the pages.
 
 ### Project workspace
 
@@ -86,10 +104,19 @@ beside the last project you used. The dialog is Tk, launched in its own process 
 from a browser session; a Python without tkinter gets a clear message instead of a failure.
 
 **Continue where you left off.** Every run stores the template you were editing — colors, fonts,
-logos, all of it — together with the Markdown, the source mode and the preview layout in the
-project's `session.json`. Reopening the project puts them all back, and the sequence counter in
-`state.json` carries on from the last id. Editing a template file by hand (or with the CLI) wins over
-the stored session, so the files on disk stay the source of truth.
+logos, all of it — together with the Markdown, the source mode, the preview layout and the document
+being edited in the project's `session.json`. Reopening the project puts them all back, and the
+sequence counter in `state.json` carries on from the last id. Editing a template file by hand (or with
+the CLI) wins over the stored session, so the files on disk stay the source of truth.
+
+**Editing a document without duplicating it.** Open an old document with **Edit** in the Library, or
+pick it under **Project document** in the source panel; it loads into the editor with its document id
+and target file names attached. Converting then rewrites `output/<name>.pdf` and
+`documents/<name>.md` and updates that history entry — same id, same files, one row in the manifest —
+instead of writing a second copy. The same thing happens automatically after a conversion: the app
+adopts the document it just created, says so above the Convert button, and updates it from then on.
+Untick **Update that document in place** (or press **Stop editing and save new copies**) to deliberately
+save a new copy instead.
 
 ### Templates
 
@@ -107,7 +134,7 @@ What the editor covers:
 | Header & footer | Enable per side, text with tokens, alignment, logo from project assets, logo size, font size, colour, rule, visibility on the first page |
 | Cover | Title, subtitle, author, company, logo, background colour or image, accent bar, date, document id, vertical alignment |
 | Watermark | Text, colour, size, opacity, rotation |
-| Markdown | TOC and its depth, numbered h2/h3, tables, fenced code, syntax highlighting, line numbers, footnotes, admonitions, smart quotes, page breaks before h1/h2 |
+| Markdown | TOC and its depth, numbered h2/h3, tables, fenced code, syntax highlighting, line numbers, footnotes, admonitions, smart quotes, page breaks before h1/h2, `\newpage` markers |
 | Document ID | Pattern, uniqueness, where the id appears (header, footer, cover, file name, PDF metadata) |
 | Metadata & advanced | Title, author, subject, keywords, language, first page number, page number style, hyphenation, justification, printed link URLs, custom CSS appended last |
 

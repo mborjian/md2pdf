@@ -110,6 +110,12 @@ h6 {
 .document > h1:first-child {
   break-before: auto;
 }
+.page-break {
+  break-after: page;
+}
+.document > .page-break:last-child {
+  break-after: auto;
+}
 $section_numbering
 a {
   color: $link_color;

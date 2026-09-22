@@ -172,6 +172,7 @@ class MarkdownOptions:
     numbered_sections: bool = False
     page_break_before_h1: bool = True
     page_break_before_h2: bool = False
+    page_breaks: bool = True
 
     def extension_names(self) -> list[str]:
         names = []

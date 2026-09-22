@@ -100,6 +100,134 @@ def stub_dialog(monkeypatch, path, error=""):
     )
 
 
+def preview_html(at) -> str:
+    for element in at.main:
+        if element.type == "iframe":
+            proto = element.proto
+            return str(getattr(proto, "srcdoc", "") or getattr(proto, "body", "") or "")
+    return ""
+
+
+def markdown_editor(at):
+    return next(item for item in at.text_area if item.label == "Markdown")
+
+
+def open_project_in_app(at, root: Path):
+    at.session_state["project"] = projects.Project.open(root)
+    at.run()
+
+
+def test_the_live_preview_follows_the_markdown_and_the_page_breaks(tmp_path):
+    skip_without_renderer()
+    root = make_project(tmp_path)
+    at = open_app()
+    at.radio(key="mode_radio").set_value("Project workspace").run()
+    open_project_in_app(at, root)
+    body = "# Survey\n\nIntro.\n\n" + "\n".join(f"| row {index} | {index} |" for index in range(30)) + "\n"
+    markdown_editor(at).set_value(body).run()
+    pages_before = at.session_state["preview_pdf"]["pages"]
+    assert pages_before >= 1
+    assert "Survey" in preview_html(at)
+    assert 'class="page-break"' not in preview_html(at)
+    at.button(key="insert_break_button").click().run()
+    assert not at.exception
+    assert "\\newpage" in at.session_state["source_text"]
+    assert 'class="page-break"' in preview_html(at)
+    assert "page break" in preview_html(at)
+    assert at.session_state["preview_pdf"]["pages"] == pages_before + 1
+
+
+def test_converting_twice_updates_the_same_project_document(tmp_path):
+    skip_without_renderer()
+    root = make_project(tmp_path)
+    at = open_app()
+    at.radio(key="mode_radio").set_value("Project workspace").run()
+    open_project_in_app(at, root)
+    markdown_editor(at).set_value("# Survey\n\nFirst pass.\n").run()
+    at.button(key="convert_button").click().run()
+    project = projects.Project.open(root)
+    assert len(project.manifest) == 1
+    first = project.manifest[0]
+    assert at.session_state["editing_id"] == first["id"]
+    assert any("Editing" in str(element.value) for element in at.info)
+    markdown_editor(at).set_value("# Survey\n\nSecond pass, with more text.\n").run()
+    at.button(key="convert_button").click().run()
+    assert not at.exception
+    project = projects.Project.open(root)
+    assert len(project.manifest) == 1
+    assert len(project.outputs()) == 1
+    assert len(project.documents()) == 1
+    stored = project.manifest[0]
+    assert stored["doc_id"] == first["doc_id"]
+    assert stored["pdf"] == first["pdf"]
+    assert stored["updated"]
+    assert stored["pages"] >= 1
+    assert at.session_state["results"][0]["updated"] is True
+
+
+def test_stopping_the_edit_saves_a_new_copy_instead(tmp_path):
+    skip_without_renderer()
+    root = make_project(tmp_path)
+    at = open_app()
+    at.radio(key="mode_radio").set_value("Project workspace").run()
+    open_project_in_app(at, root)
+    markdown_editor(at).set_value("# Survey\n\nFirst pass.\n").run()
+    at.button(key="convert_button").click().run()
+    at.button(key="stop_editing_button").click().run()
+    assert at.session_state["editing_id"] == ""
+    assert not any("Editing" in str(element.value) for element in at.info)
+    at.button(key="convert_button").click().run()
+    project = projects.Project.open(root)
+    assert len(project.manifest) == 2
+    assert len(project.outputs()) == 2
+
+
+def test_the_library_reopens_a_document_for_editing(tmp_path):
+    skip_without_renderer()
+    root = make_project(tmp_path)
+    at = open_app()
+    at.radio(key="mode_radio").set_value("Project workspace").run()
+    open_project_in_app(at, root)
+    markdown_editor(at).set_value("# Survey\n\nFirst pass.\n").run()
+    at.button(key="convert_button").click().run()
+    at.button(key="stop_editing_button").click().run()
+    entry = projects.Project.open(root).manifest[0]
+    at.button(key=f"library_open_0_{entry['id']}").click().run()
+    assert not at.exception
+    assert at.session_state["editing_id"] == entry["id"]
+    assert at.session_state["source_text"].startswith("# Survey")
+    at.button(key="convert_button").click().run()
+    project = projects.Project.open(root)
+    assert len(project.manifest) == 1
+    assert project.manifest[0]["updated"]
+
+
+def test_project_documents_load_into_the_editor_with_a_reload(tmp_path):
+    skip_without_renderer()
+    root = make_project(tmp_path)
+    source = tmp_path / "brief.md"
+    source.write_text("# Brief\n\nOriginal body.\n", encoding="utf-8")
+    assert main(["convert", str(source), "--project", str(root)]) == 0
+    entry = projects.Project.open(root).manifest[0]
+    at = open_app()
+    at.radio(key="mode_radio").set_value("Project workspace").run()
+    open_project_in_app(at, root)
+    at.radio(key="source_mode").set_value("Project document").run()
+    assert not at.exception
+    assert at.session_state["editing_id"] == entry["id"]
+    assert at.session_state["source_text"] == "# Brief\n\nOriginal body.\n"
+    markdown_editor(at).set_value("# Brief\n\nEdited in the app.\n").run()
+    assert "Edited in the app" in at.session_state["source_text"]
+    at.button(key="reload_document_button").click().run()
+    assert at.session_state["source_text"] == "# Brief\n\nOriginal body.\n"
+    markdown_editor(at).set_value("# Brief\n\nEdited again.\n").run()
+    at.button(key="convert_button").click().run()
+    project = projects.Project.open(root)
+    assert len(project.manifest) == 1
+    assert len(project.outputs()) == 1
+    assert project.read_entry_markdown(project.manifest[0]) == "# Brief\n\nEdited again.\n"
+
+
 def open_via_dialog(at, root: Path):
     at.button(key="browse_project_button").click().run()
     assert not at.exception

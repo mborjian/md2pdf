@@ -313,6 +313,73 @@ class Project:
         self.save_manifest()
         return entry
 
+    def entry(self, entry_id: str) -> dict | None:
+        for item in self.manifest:
+            if item.get("id") == entry_id:
+                return item
+        return None
+
+    def entry_for_markdown(self, relative_path: str | Path) -> dict | None:
+        target = str(relative_path).replace("\\", "/")
+        for item in self.manifest:
+            stored = str(item.get("markdown") or "").replace("\\", "/")
+            if stored and stored == target:
+                return item
+        return None
+
+    def update_conversion(
+        self,
+        entry_id: str,
+        markdown_text: str,
+        *,
+        pdf_bytes: bytes,
+        output_name: str,
+        doc_id: str = "",
+        title: str = "",
+        template_name: str = "",
+        source_name: str = "",
+        page_count: int = 0,
+        save_markdown: bool = True,
+        updated: str | None = None,
+    ) -> dict | None:
+        entry = self.entry(entry_id)
+        if entry is None:
+            return None
+        stem = Path(output_name).stem or "document"
+        previous_pdf = str(entry.get("pdf") or "")
+        pdf_target = self.directory(OUTPUT_DIR) / f"{stem}.pdf"
+        if previous_pdf and self.relative(pdf_target) != previous_pdf:
+            pdf_target = self.unique_target(OUTPUT_DIR, f"{stem}.pdf")
+        pdf_target.write_bytes(pdf_bytes)
+        current_pdf = self.relative(pdf_target)
+        if previous_pdf and previous_pdf != current_pdf:
+            self.absolute(previous_pdf).unlink(missing_ok=True)
+        previous_md = str(entry.get("markdown") or "")
+        markdown_path = previous_md
+        if save_markdown:
+            md_target = self.directory(DOCUMENTS_DIR) / f"{stem}.md"
+            if previous_md and self.relative(md_target) != previous_md:
+                md_target = self.unique_target(DOCUMENTS_DIR, f"{stem}.md")
+            md_target.write_text(markdown_text or "", encoding="utf-8")
+            markdown_path = self.relative(md_target)
+            if previous_md and previous_md != markdown_path:
+                self.absolute(previous_md).unlink(missing_ok=True)
+        entry.update(
+            {
+                "doc_id": doc_id or entry.get("doc_id", ""),
+                "title": title or entry.get("title", ""),
+                "template": template_name or entry.get("template", ""),
+                "source": source_name or entry.get("source", ""),
+                "markdown": markdown_path,
+                "pdf": current_pdf,
+                "pages": int(page_count or 0),
+                "bytes": pdf_target.stat().st_size,
+                "updated": updated or datetime.datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        self.save_manifest()
+        return entry
+
     def history(self) -> list[dict]:
         return list(reversed(self.manifest))
 

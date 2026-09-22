@@ -53,3 +53,11 @@ Term
 - Add a cover page from the Cover tab.
 - Turn on **Number h2/h3 headings** for numbered sections.
 - Export the template and hand it to a colleague.
+
+\newpage
+
+## Page breaks on demand
+
+That line above this heading starts a new page: it is a plain `\newpage` marker, the same one the
+**Page breaks** panel inserts for you. Use one above a table or a section that should not be split
+across two pages, and the live preview draws a dashed line where the page will end.

@@ -46,6 +46,68 @@ def test_session_round_trip(tmp_path):
     assert project.load_session() == {}
 
 
+def test_update_conversion_keeps_one_document(tmp_path):
+    project = projects.Project.create(tmp_path / "Reports", name="Reports")
+    first = project.save_conversion(
+        "# One\n",
+        pdf_bytes=b"first draft",
+        output_name="DOC-1-one.pdf",
+        doc_id="DOC-1",
+        title="One",
+        page_count=2,
+    )
+    assert [path.name for path in project.outputs()] == ["DOC-1-one.pdf"]
+    updated = project.update_conversion(
+        first["id"],
+        "# One\n\nmore text\n",
+        pdf_bytes=b"second draft",
+        output_name="DOC-1-one.pdf",
+        doc_id="DOC-1",
+        title="One",
+        page_count=3,
+    )
+    assert updated is not None
+    assert len(project.manifest) == 1
+    assert [path.name for path in project.outputs()] == ["DOC-1-one.pdf"]
+    assert [path.name for path in project.documents()] == ["DOC-1-one.md"]
+    stored = project.entry(first["id"])
+    assert stored is not None
+    assert stored["pages"] == 3
+    assert stored["bytes"] == len(b"second draft")
+    assert stored["updated"]
+    assert project.entry_pdf_bytes(stored) == b"second draft"
+    assert project.read_entry_markdown(stored) == "# One\n\nmore text\n"
+    assert projects.Project.open(project.root).entry(first["id"])["pages"] == 3
+
+
+def test_update_conversion_renames_without_leaving_files_behind(tmp_path):
+    project = projects.Project.create(tmp_path / "Reports", name="Reports")
+    first = project.save_conversion(
+        "# One\n", pdf_bytes=b"a", output_name="DOC-1-one.pdf", doc_id="DOC-1"
+    )
+    project.save_conversion("# Two\n", pdf_bytes=b"b", output_name="DOC-2-two.pdf", doc_id="DOC-2")
+    project.update_conversion(
+        first["id"],
+        "# One renamed\n",
+        pdf_bytes=b"c",
+        output_name="DOC-1-renamed.pdf",
+        doc_id="DOC-1",
+    )
+    assert sorted(path.name for path in project.outputs()) == ["DOC-1-renamed.pdf", "DOC-2-two.pdf"]
+    assert sorted(path.name for path in project.documents()) == ["DOC-1-renamed.md", "DOC-2-two.md"]
+    assert project.entry(first["id"])["pdf"].endswith("DOC-1-renamed.pdf")
+    assert project.update_conversion("missing", "# x\n", pdf_bytes=b"x", output_name="x.pdf") is None
+
+
+def test_entries_can_be_found_by_id_and_by_markdown_path(tmp_path):
+    project = projects.Project.create(tmp_path / "Reports", name="Reports")
+    entry = project.save_conversion("# One\n", pdf_bytes=b"a", output_name="one.pdf")
+    assert project.entry(entry["id"]) is entry
+    assert project.entry("missing") is None
+    assert project.entry_for_markdown(entry["markdown"]) is entry
+    assert project.entry_for_markdown("documents/nope.md") is None
+
+
 def test_template_digest_follows_the_file(tmp_path):
     project = projects.Project.create(tmp_path / "Reports", name="Reports")
     original = project.template_digest("Default")

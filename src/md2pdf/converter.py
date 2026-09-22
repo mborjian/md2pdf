@@ -16,6 +16,14 @@ CSS_URL_RE = re.compile(r'url\(\s*"([^"]+)"\s*\)')
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico"}
 ATX_HEADING_RE = re.compile(r"^[ \t]{0,3}#[ \t]+(.*?)[ \t]*#*[ \t]*$")
 FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+PAGE_BREAK_RE = re.compile(
+    r"^[ \t]*(?:\\newpage|\\pagebreak|<!--\s*(?:page[ -]?break|newpage)\s*-->)[ \t]*$",
+    re.IGNORECASE,
+)
+ATX_ANY_RE = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
+PAGE_BREAK_TEXT = "\\newpage"
+PAGE_BREAK_HTML = '<div class="page-break"></div>'
 
 GENERATOR = "md2pdf"
 INLINE_SAMPLE = """# Sample document
@@ -40,6 +48,24 @@ def convert(source: str) -> bytes:
 
 [^1]: Footnotes render at the end of the document.
 """
+
+
+@dataclass
+class MarkdownBlock:
+    start: int
+    end: int
+    kind: str
+    heading: str = ""
+    preview: str = ""
+    has_break: bool = False
+
+    def label(self) -> str:
+        parts = [f"{self.kind} · line {self.start + 1}"]
+        if self.heading:
+            parts.append(f"under \"{self.heading}\"")
+        if self.preview:
+            parts.append(self.preview)
+        return " · ".join(parts)
 
 
 @dataclass
@@ -117,6 +143,122 @@ def make_context(
     )
 
 
+def is_page_break(line: str) -> bool:
+    return bool(PAGE_BREAK_RE.match(line or ""))
+
+
+def _fence_update(line: str, fence: str) -> tuple[str, bool]:
+    marker = FENCE_RE.match(line)
+    if not marker:
+        return fence, False
+    token = marker.group(1)
+    if not fence:
+        return token, True
+    if token[0] == fence[0] and len(token) >= len(fence):
+        return "", True
+    return fence, True
+
+
+def apply_page_breaks(text: str) -> str:
+    lines = (text or "").splitlines()
+    fence = ""
+    output: list[str] = []
+    for line in lines:
+        fence, inside_fence = _fence_update(line, fence)
+        if not fence and not inside_fence and is_page_break(line):
+            output.append(PAGE_BREAK_HTML)
+        else:
+            output.append(line)
+    joined = "\n".join(output)
+    return joined + "\n" if (text or "").endswith("\n") else joined
+
+
+def _line_kind(line: str) -> str:
+    stripped = line.strip()
+    if not stripped or is_page_break(line):
+        return ""
+    if FENCE_RE.match(line):
+        return "code"
+    heading = ATX_ANY_RE.match(line)
+    if heading and heading.group(2).strip():
+        return f"h{len(heading.group(1))} heading"
+    if stripped.startswith("|"):
+        return "table"
+    if stripped.startswith(">"):
+        return "quote"
+    if LIST_RE.match(line):
+        return "list"
+    return "paragraph"
+
+
+def _heading_before(lines: list[str], index: int) -> str:
+    fence = ""
+    found = ""
+    for line in lines[:index]:
+        fence, _ = _fence_update(line, fence)
+        if fence:
+            continue
+        match = ATX_ANY_RE.match(line)
+        if match and match.group(2).strip():
+            found = match.group(2).strip()
+    return found
+
+
+def _shorten(line: str, limit: int = 64) -> str:
+    text = " ".join((line or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _block_preview(lines: list[str], start: int, end: int) -> str:
+    for line in lines[start:end]:
+        if line.strip() and not FENCE_RE.match(line):
+            return _shorten(line)
+    return _shorten(lines[start]) if start < len(lines) else ""
+
+
+def markdown_blocks(text: str) -> list[MarkdownBlock]:
+    lines = (text or "").splitlines()
+    kinds: list[str] = []
+    fence = ""
+    for line in lines:
+        previous_fence = fence
+        fence, inside_fence = _fence_update(line, fence)
+        kinds.append("code" if (previous_fence or inside_fence) else _line_kind(line))
+    blocks: list[MarkdownBlock] = []
+    current: MarkdownBlock | None = None
+    for index, kind in enumerate(kinds):
+        if current is not None and kind == current.kind and kind not in ("", "heading"):
+            current.end = index + 1
+            continue
+        if kind:
+            current = MarkdownBlock(start=index, end=index + 1, kind=kind)
+            blocks.append(current)
+        else:
+            current = None
+    for block in blocks:
+        block.heading = _heading_before(lines, block.start)
+        block.preview = _block_preview(lines, block.start, block.end)
+        previous = ""
+        for line in reversed(lines[: block.start]):
+            if line.strip():
+                previous = line
+                break
+        block.has_break = is_page_break(previous)
+    return blocks
+
+
+def insert_page_break(text: str, start_line: int, marker: str = PAGE_BREAK_TEXT) -> str:
+    lines = (text or "").splitlines()
+    index = max(0, min(int(start_line), len(lines)))
+    insertion: list[str] = []
+    if index > 0 and lines[index - 1].strip():
+        insertion.append("")
+    insertion.extend([marker, ""])
+    merged = lines[:index] + insertion + lines[index:]
+    result = "\n".join(merged)
+    return result + "\n" if (text or "").endswith("\n") else result
+
+
 def render_markdown(text: str, options) -> tuple[str, str]:
     markdown_lib = _load_markdown()
     extensions = options.extension_names()
@@ -138,7 +280,8 @@ def render_markdown(text: str, options) -> tuple[str, str]:
             "noclasses": False,
         }
     engine = markdown_lib.Markdown(extensions=extensions, extension_configs=configs, output_format="html5")
-    body = engine.convert(text or "")
+    prepared = apply_page_breaks(text) if getattr(options, "page_breaks", True) else (text or "")
+    body = engine.convert(prepared)
     toc_html = getattr(engine, "toc", "") if "toc" in extensions else ""
     return body, toc_html
 
@@ -292,14 +435,14 @@ def html_to_pdf(html: str, base_url: str | Path | None = None) -> tuple[bytes, i
     return document.write_pdf(), len(document.pages)
 
 
-def convert(
+def render_document(
     markdown_text: str,
     template: Template,
     *,
     doc_id: str = "",
     context: docids.DocIdContext | None = None,
     base_dir: str | Path | None = None,
-) -> ConversionResult:
+) -> tuple[str, str, list[str]]:
     warnings: list[str] = []
     doc_context = make_context(template, context=context)
     body, toc_html = render_markdown(markdown_text, template.document.markdown)
@@ -311,6 +454,25 @@ def convert(
         toc_html=toc_html,
         base_dir=base_dir,
         warnings=warnings,
+    )
+    return html, css, warnings
+
+
+def convert(
+    markdown_text: str,
+    template: Template,
+    *,
+    doc_id: str = "",
+    context: docids.DocIdContext | None = None,
+    base_dir: str | Path | None = None,
+) -> ConversionResult:
+    doc_context = make_context(template, context=context)
+    html, css, warnings = render_document(
+        markdown_text,
+        template,
+        doc_id=doc_id,
+        context=doc_context,
+        base_dir=base_dir,
     )
     pdf_bytes, page_count = html_to_pdf(html, base_url=base_dir)
     return ConversionResult(
