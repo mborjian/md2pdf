@@ -58,7 +58,7 @@ def test_app_starts_without_errors(entry):
     assert not at.session_state["results"]
 
 
-def test_app_converts_the_example_and_shows_both_views():
+def test_app_converts_the_example_and_shows_the_preview_beside_the_editor():
     skip_without_renderer()
     at = open_app()
     at.radio(key="source_mode").set_value("Example document").run()
@@ -73,10 +73,17 @@ def test_app_converts_the_example_and_shows_both_views():
     assert item["name"].endswith(".pdf")
     assert item["html"].startswith("<!DOCTYPE html>")
     assert '<main class="document">' in item["html"]
-    assert at.radio(key="preview_layout").value == "PDF and preview"
+    assert at.session_state["preview_pdf"]["pages"] == item["pages"]
+    assert not [element for element in at.main if element.type == "iframe"]
+    assert not [element for element in at.radio if element.label == "Layout"]
     if pdf_component_available():
         messages = [str(element.value) for element in at.warning]
         assert not [text for text in messages if "inline PDF viewer needs" in text]
+    at.button(key="edit_example_button").click().run()
+    assert not at.exception
+    assert at.session_state["source_mode"] == "Paste Markdown"
+    assert markdown_editor(at).value.startswith("# ")
+    assert at.session_state["preview_pdf"]["pages"] >= 1
 
 
 def test_app_stays_quiet_when_the_library_path_is_already_set():
@@ -101,15 +108,38 @@ def stub_dialog(monkeypatch, path, error=""):
 
 
 def preview_html(at) -> str:
-    for element in at.main:
-        if element.type == "iframe":
-            proto = element.proto
-            return str(getattr(proto, "srcdoc", "") or getattr(proto, "body", "") or "")
-    return ""
+    return str((at.session_state.get("preview_pdf") or {}).get("html") or "")
 
 
 def markdown_editor(at):
     return next(item for item in at.text_area if item.label == "Markdown")
+
+
+def app_blocks(block):
+    try:
+        children = list(block.children.values())
+    except AttributeError:
+        return []
+    found = []
+    for child in children:
+        found.append(child)
+        found.extend(app_blocks(child))
+    return found
+
+
+def the_editor_and_the_pdf_preview_share_a_row(at) -> list[str]:
+    rows: list[list[str]] = []
+    for node in app_blocks(at.main):
+        if node.type != "flex_container":
+            continue
+        inner = app_blocks(node)
+        has_editor = any(item.type == "text_area" and item.proto.label == "Markdown" for item in inner)
+        has_preview = any(
+            item.type == "markdown" and str(item.value) == "**PDF preview**" for item in inner
+        )
+        if has_editor and has_preview:
+            rows.append([child.type for child in node.children.values()])
+    return rows[-1] if rows else []
 
 
 def open_project_in_app(at, root: Path):
@@ -117,7 +147,7 @@ def open_project_in_app(at, root: Path):
     at.run()
 
 
-def test_the_live_preview_follows_the_markdown_and_the_page_breaks(tmp_path):
+def test_the_preview_follows_the_markdown_and_the_page_breaks(tmp_path):
     skip_without_renderer()
     root = make_project(tmp_path)
     at = open_app()
@@ -133,7 +163,6 @@ def test_the_live_preview_follows_the_markdown_and_the_page_breaks(tmp_path):
     assert not at.exception
     assert "\\newpage" in at.session_state["source_text"]
     assert 'class="page-break"' in preview_html(at)
-    assert "page break" in preview_html(at)
     assert at.session_state["preview_pdf"]["pages"] == pages_before + 1
 
 
@@ -332,24 +361,56 @@ def test_reopening_a_project_restores_the_last_session(tmp_path, monkeypatch):
     assert at.session_state["source_name"].endswith(".md")
 
 
-def test_reopening_a_project_restores_the_preview_layout(tmp_path, monkeypatch):
+def test_the_markdown_editor_sits_beside_the_pdf_preview():
+    skip_without_renderer()
+    at = open_app()
+    markdown_editor(at).set_value("# Layout\n\nBody.\n").run()
+    assert not at.exception
+    assert the_editor_and_the_pdf_preview_share_a_row(at) == ["column", "column"]
+    assert at.session_state["preview_pdf"]["pages"] >= 1
+    assert not [element for element in at.main if element.type == "iframe"]
+
+
+def test_new_document_starts_a_second_document_without_touching_the_first(tmp_path):
     skip_without_renderer()
     root = make_project(tmp_path)
-    stub_dialog(monkeypatch, root)
     at = open_app()
     at.radio(key="mode_radio").set_value("Project workspace").run()
-    open_via_dialog(at, root)
+    open_project_in_app(at, root)
+    markdown_editor(at).set_value("# Survey\n\nFirst document.\n").run()
+    at.button(key="convert_button").click().run()
+    assert len(projects.Project.open(root).manifest) == 1
+    assert at.session_state["editing_id"]
+    at.button(key="new_document_button").click().run()
+    assert not at.exception
+    assert at.session_state["editing_id"] == ""
+    assert at.session_state["results"] == []
+    assert at.session_state["source_name"] == "draft.md"
+    assert at.session_state["source_text"].startswith("# Untitled document")
+    assert markdown_editor(at).value.startswith("# Untitled document")
+    markdown_editor(at).set_value("# Second survey\n\nA fresh document.\n").run()
+    at.button(key="convert_button").click().run()
+    project = projects.Project.open(root)
+    assert len(project.manifest) == 2
+    assert len(project.outputs()) == 2
+    assert len(project.documents()) == 2
+
+
+def test_new_document_resets_a_one_time_session():
+    skip_without_renderer()
+    at = open_app()
     at.radio(key="source_mode").set_value("Example document").run()
     at.button(key="convert_button").click().run()
     assert len(at.session_state["results"]) == 1
-    next(item for item in at.radio if item.label == "Layout").set_value("PDF only").run()
-    at.button(key="close_project_button").click().run()
-    assert at.session_state["project"] is None
-    open_via_dialog(at, root)
-    assert at.session_state["layout_pref"] == "PDF only"
-    assert projects.Project.open(root).load_session()["preview_layout"] == "PDF only"
-    at.button(key="convert_button").click().run()
-    assert next(item for item in at.radio if item.label == "Layout").value == "PDF only"
+    at.button(key="new_document_button").click().run()
+    assert not at.exception
+    assert at.session_state["results"] == []
+    assert at.session_state["source_mode"] == "Paste Markdown"
+    assert at.session_state["source_name"] == "draft.md"
+    assert at.session_state["source_text"].startswith("# Untitled document")
+    assert at.session_state["preview_pdf"]["pages"] >= 1
+    assert "project" not in at.session_state
+    assert "Project: none open" in [str(element.value) for element in at.caption]
 
 
 def test_editing_a_template_file_on_disk_beats_the_stored_session(tmp_path, monkeypatch):
